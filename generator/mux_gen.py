@@ -100,6 +100,25 @@ if __name__ == "__main__":
                     for mux in range(0, mux_signals)
                 ]
             )
+            # hw/sw direction control signals
+            mod.add(
+                [
+                    HDLSignal("comb", f"diren{mux}", size=1)
+                    for mux in range(0, mux_signals)
+                ]
+            )
+            mod.add(
+                [
+                    HDLSignal("comb", f"dirctl{mux}", size=1)
+                    for mux in range(0, mux_signals)
+                ]
+            )
+            mod.add(
+                [
+                    HDLSignal("comb", f"hw_dir_sig{mux}", size=1)
+                    for mux in range(0, mux_signals)
+                ]
+            )
 
             @HDLBlock(mod)
             @ParallelBlock()
@@ -117,6 +136,9 @@ if __name__ == "__main__":
                 out_sig = mod.get_signal_or_port("sig_out")
                 sel_sig = mod.get_signal_or_port(f"srcsel{mux}")
                 short_sig = mod.get_signal_or_port(f"shortsel{mux}")
+                diren_sig = mod.get_signal_or_port(f"diren{mux}")
+                dirctl_sig = mod.get_signal_or_port(f"dirctl{mux}")
+                hw_dir_sig = mod.get_signal_or_port(f"hw_dir_sig{mux}")
                 _dir_ports = [
                     mod.get_signal_or_port(f"sig{mux}ctl{alt}")
                     for alt in range(0, alternate_signals + 1)
@@ -132,7 +154,11 @@ if __name__ == "__main__":
                 ]
 
                 # direction control multiplexer
-                mod.add([get_multiplexer(dir_sig[mux], sel_sig, *_dir_ports)])
+                hw_dir_mux = get_multiplexer(hw_dir_sig, sel_sig, *_dir_ports)
+                dir_mux = get_multiplexer(
+                    dir_sig[mux], diren_sig, hw_dir_sig, dirctl_sig
+                )
+                mod.add([hw_dir_mux, dir_mux])
 
                 # output signal routing
                 mod.add([get_multiplexer(out_sig[mux], sel_sig, *_out_ports)])
@@ -150,20 +176,29 @@ if __name__ == "__main__":
                     )
 
             # TODO: add axi_slave instance
-            extra_slave_ports = [
-                output_port(
-                    f"srcsel{mux}",
-                    size=clog2(alternate_signals),
-                )
-                for mux in range(0, mux_signals)
-            ] + [
-                output_port(f"shortsel{mux}") for mux in range(0, mux_signals)
-            ]
+            extra_slave_ports = (
+                [
+                    output_port(
+                        f"srcsel{mux}",
+                        size=clog2(alternate_signals),
+                    )
+                    for mux in range(0, mux_signals)
+                ]
+                + [
+                    output_port(f"shortsel{mux}")
+                    for mux in range(0, mux_signals)
+                ]
+                + [output_port(f"diren{mux}") for mux in range(0, mux_signals)]
+                + [
+                    output_port(f"dirctl{mux}")
+                    for mux in range(0, mux_signals)
+                ]
+            )
             axi_slave = AXI4LiteSlave(
                 "axislave", extra_ports=extra_slave_ports
             )
-            axi_slave.attach_parameter_value("addr_width", 6)
-            axi_slave.attach_parameter_value("data_width", 32)
+            axi_slave.attach_parameter_value("C_S_AXI_ADDR_WIDTH", 6)
+            axi_slave.attach_parameter_value("C_S_AXI_DATA_WIDTH", 32)
             axi_slave.connect_port("s_axi", "s_axi")
             # capitalize ports
             port_names = list(axi_slave.ports.keys())
@@ -172,6 +207,8 @@ if __name__ == "__main__":
             for mux in range(0, mux_signals):
                 axi_slave.connect_port(f"srcsel{mux}", f"srcsel{mux}")
                 axi_slave.connect_port(f"shortsel{mux}", f"shortsel{mux}")
+                axi_slave.connect_port(f"diren{mux}", f"diren{mux}")
+                axi_slave.connect_port(f"dirctl{mux}", f"dirctl{mux}")
             mod.add_instances(axi_slave)
 
         return axi_mux()
