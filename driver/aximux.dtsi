@@ -1,0 +1,25 @@
+/ {
+
+aximux0: aximux@0x0000 {
+    compatible = "axi-mux-2.0";
+    alternate-signals = <8>;
+     // with HW direction control (cannot have defaults)
+    mysignal0 {
+      alternate-names = "alt0", "alt1";
+      hw-direction;
+    };
+
+    // with HW/SW control
+    mysignal1 {
+      alternate-names = "alt0", "alt1", "alt2";
+    }
+
+    // SW control
+     mysignal2 {
+      alternate-names = "x", "y", "z";
+      sw-direction;
+      default-direction = <0>;
+    }
+  };
+
+};
