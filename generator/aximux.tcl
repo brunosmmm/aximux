@@ -1,9 +1,9 @@
 # ip
-set ip_name axi_mux
+set ip_name aximux__%SIG_COUNT%__%ALT_COUNT%
 
 set proj_files [list \
-                    "axi_mux.v" \
-                    "axislave.v" \
+                    "aximux__%SIG_COUNT%__%ALT_COUNT%.v" \
+                    "axislave__%SIG_COUNT%__%ALT_COUNT%.v" \
                    ]
 
 create_project $ip_name . -force
@@ -20,11 +20,11 @@ set_property "top" "$ip_name" $proj_fileset
 #set properties
 ipx::package_project -root_dir .
 
-set_property vendor {esl} [ipx::current_core]
+set_property vendor {bmorais} [ipx::current_core]
 set_property library {user} [ipx::current_core]
 set_property taxonomy {{/AXI_Infrastructure}} [ipx::current_core]
 set_property vendor_display_name {BMorais} [ipx::current_core]
-set_property display_name {AXI Signal Multiplexer} [ipx::current_core]
+set_property display_name {AXI Signal Multiplexer (%SIG_COUNT% x %ALT_COUNT%)} [ipx::current_core]
 set_property description {Multiplex signals controlled by AXI interface} [ipx::current_core]
 
 set_property supported_families \
