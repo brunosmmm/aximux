@@ -8,6 +8,8 @@ param alt_signals 1;
 param alt_signal_size $clog2(alt_signals);
 
 //registers
+
+// Selector registers
 for ii in <0, mux_signals> generate
   register SRCSEL{ii} description="Source select register {ii}";
 
@@ -25,3 +27,9 @@ for ii in <0, mux_signals> generate
   output diren{ii} source=SRCSEL{ii}.DCTL;
   output dirctl{ii} source=SRCSEL{ii}.DIR;
 end;
+
+// Information Registers
+register MUXINFO at 0x80 description="Hardware Information";
+field MUXINFO.SIGNALS position=7..0 access=R default={mux_signals};
+field MUXINFO.ALTSIGS position=15..8 access=R default={alt_signals};
+field MUXINFO.RESERVED position=31..16 access=R;
