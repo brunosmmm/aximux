@@ -1,8 +1,10 @@
 
+OUTPUT_LOCATION := $(shell pwd)/output
+
 all: generate driver
 
 generate:
-	$(MAKE) -C generator
+	OUTPUT_LOCATION=$(OUTPUT_LOCATION) $(MAKE) -C generator
 
 driver:
 	$(MAKE) -C driver
