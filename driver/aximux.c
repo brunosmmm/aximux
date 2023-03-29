@@ -44,6 +44,33 @@
 #define SIGNAL_LIMIT 32
 #define SIGNAL_ALT_LIMIT 16
 
+#define PORT_HAS_HW_CONTROL 0x01
+#define PORT_HAS_SW_CONTROL 0x02
+#define PORT_HWSW_CONTROL 0x08
+#define PORT_SW_DIR 0x04
+
+struct aximux_port {
+  unsigned int idx;
+  char *signal_name;
+  const char **alternate_names;
+
+  unsigned int alternate_count;
+
+  // TODO: default states via device-tree
+  unsigned int default_source;
+  unsigned int default_direction;
+
+  // direction control flags
+  unsigned int direction_flags;
+
+  // HACK: store attrs here for reference later, there are 5 attrs
+  struct device_attribute source;
+  struct device_attribute name;
+  struct device_attribute diren;
+  struct device_attribute dirctl;
+  struct device_attribute alternates;
+};
+
 //ualu instance struct
 struct aximux_device
 {
@@ -60,9 +87,8 @@ struct aximux_device
   u32 driver_flags;
   u32 instance_number;
 
-  //signal names
-  char** signals;
-  char** alt_signals;
+  //signals
+  struct aximux_port *ports;
 };
 
 //global driver data structure
@@ -93,13 +119,17 @@ static inline u32 reg_read(struct aximux_device *dev, u32 reg)
 void aximux_set_src(struct aximux_device* dev, unsigned int port, unsigned int source)
 {
   unsigned int cursrc = 0;
+  unsigned int regval = 0;
   if (!dev) {
     return;
   }
-  cursrc = reg_read(dev, AXIMUX_REG_SEL);
-  cursrc &= ~(1<<port);
-  cursrc |= (source) ? (1<<port) : 0;
-  reg_write(dev, AXIMUX_REG_SEL, cursrc & AXIMUX_SEL_MASK);
+  // register offset is port #
+  // maximum 4 bits for source (16 alternates)
+  regval = reg_read(dev, port);
+  cursrc = regval & 0x0F;
+  regval &= ~(0x0F);
+  regval |= source & 0xF;
+  reg_write(dev, port, regval);
 }
 EXPORT_SYMBOL(aximux_set_src);
 
@@ -109,7 +139,7 @@ void aximux_get_src(struct aximux_device*dev, unsigned int port, unsigned int *s
     {
       return;
     }
-  *source = (reg_read(dev, AXIMUX_REG_SEL) & (1<<port)) ? 1 : 0;
+  *source = reg_read(dev, port) & 0x0F;
 }
 EXPORT_SYMBOL(aximux_get_src);
 
@@ -118,21 +148,22 @@ static ssize_t src_store(struct device* dev, struct device_attribute* attr,
                          const char* buf, size_t count)
 {
   struct aximux_device* drv = dev_get_drvdata(dev);
+  struct aximux_port* port;
   unsigned int value = 0;
-  unsigned int port = 0;
 
   // hack to find port #
-  sscanf(attr->attr.name, "source%d", &port);
 
   //get value
-  sscanf(buf, "%u", &value);
+  port = container_of(attr, struct aximux_port, source);
 
-  if (value > AXIMUX_SEL_MASK)
+  if (value > port->alternate_count)
     {
+      printk(KERN_ERR "AXI Mux: port %d (%s) only has %d alternates\n",
+             port->idx, port->signal_name, port->alternate_count);
       return -EINVAL;
     }
 
-  aximux_set_src(drv, port, value);
+  aximux_set_src(drv, port->idx, value);
 
   return count;
 }
@@ -140,46 +171,70 @@ static ssize_t src_store(struct device* dev, struct device_attribute* attr,
 static ssize_t src_show(struct device* dev, struct device_attribute* attr, char* buf)
 {
   struct aximux_device* drv = dev_get_drvdata(dev);
+  struct aximux_port* port;
   unsigned int cur_src = 0;
-  unsigned int port = 0;
 
   // hack to find port #
-  sscanf(attr->attr.name, "source%d", &port);
+  port = container_of(attr, struct aximux_port, source);
 
-  aximux_get_src(drv, port, &cur_src);
+  aximux_get_src(drv, port->idx, &cur_src);
+  if (cur_src > port->alternate_count) {
+      printk(KERN_ERR "AXI Mux: got invalid value from port %d (%s) selector\n", port->idx,
+             port->signal_name);
+      return -EINVAL;
+  }
 
   return sprintf(buf, "%u\n", cur_src);
 }
 
+static ssize_t name_show(struct device *dev, struct device_attribute *attr,
+                        char *buf) {
+  struct aximux_port *port;
 
-// device attributes
-/* static struct device_attribute src_attr = { */
-/*   .attr = { */
-/*     .name = "source", */
-/*     .mode = S_IWUSR | S_IRUGO, */
-/*   }, */
-/*   .show = src_show, */
-/*   .store = src_store, */
-/* }; */
-static struct attribute *aximux_attrs[8] = {
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
-};
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, source);
 
-static struct attribute_group aximux_inst_attr_group = {
-  .name = "control",
-  .attrs = aximux_attrs,
-};
+  return sprintf(buf, "%s\n", port->signal_name);
+}
 
-static const struct attribute_group* aximux_inst_attr_groups[] = {
-  &aximux_inst_attr_group,
-  NULL
+static ssize_t diren_show(struct device *dev, struct device_attribute *attr,
+                         char *buf) {
+  struct aximux_port *port;
+  struct aximux_device *drv = dev_get_drvdata(dev);
+  unsigned int port_reg = 0;
+  // TODO: confirm if HW is 1 / SW 0
+  unsigned char is_hw;
+
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, source);
+
+  port_reg = reg_read(drv, port->idx);
+  is_hw = (port_reg & (1<<AXIMUX_REGOFF_DIREN));
+
+  return sprintf(buf, "%s\n", is_hw ? "HW" : "SW");
+}
+
+static ssize_t diren_store(struct device *dev, struct device_attribute *attr,
+                           const char *buf, size_t count) {
+  struct aximux_port *port;
+  struct aximux_device *drv = dev_get_drvdata(dev);
+  unsigned int port_reg = 0;
+
+  // TODO compare input
+
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, source);
+
+  port_reg = reg_read(drv, port->idx);
+  port_reg &=  ~(1 << AXIMUX_REGOFF_DIREN);
+  // TODO do something, writeback
+  reg_write(drv, port->idx, port_reg);
+
+  return count;
+}
+
+static const struct attribute_group* aximux_inst_attr_groups[SIGNAL_LIMIT] = {
+  NULL,
 };
 
 static struct class aximux_class = {
@@ -195,22 +250,76 @@ int aximux_instance_count(void)
 EXPORT_SYMBOL(aximux_instance_count);
 
 static struct of_device_id aximux_of_ids[] = {
-  { .compatible = "xlnx,axi-mux-1.0", },
+  { .compatible = "axi-mux-2.0", },
   {}
 };
 MODULE_DEVICE_TABLE(of, aximux_of_ids);
 
+int allocate_port_attributes(struct device *dev, struct aximux_port *port,
+                             struct attribute ***port_attrs)
+{
+  struct device_attribute name = {
+    .attr = {.name = "name", .mode = S_IRUGO},
+    .show = name_show};
+  struct device_attribute alternate = {
+    .attr = {.name = "alternates", .mode = S_IRUGO}};
+  struct device_attribute diren = {
+    .attr = {.name = "direction_control", .mode = S_IWUSR | S_IRUGO},
+    .show = diren_show,
+    .store = diren_store};
+  struct device_attribute dirctl = {
+    .attr = {.name = "direction", .mode = S_IWUSR | S_IRUGO}};
+  struct device_attribute source = {
+    .attr = {.name = "source", .mode = S_IWUSR | S_IRUGO},
+    .show = src_show,
+    .store = src_store};
+
+  struct attribute *_port_attrs[6];
+
+  // hide attributes if HW control only
+  if ((port->direction_flags & PORT_HAS_HW_CONTROL) && (!(port->direction_flags & PORT_HAS_SW_CONTROL))) {
+    diren.attr.mode = S_IRUGO;
+    diren.store = NULL;
+    _port_attrs[4] = NULL;
+  } else {
+    if (port->direction_flags & PORT_HAS_SW_CONTROL) {
+      port->dirctl = dirctl;
+      _port_attrs[4] = &port->dirctl.attr;
+    }
+    if (!(port->direction_flags & PORT_HAS_HW_CONTROL)) {
+      diren.attr.mode = S_IRUGO;
+      diren.store = NULL;
+    }
+  }
+
+  port->name = name;
+  port->alternates = alternate;
+  port->source = source;
+  port->diren = diren;
+
+  _port_attrs[0] = &port->name.attr;
+  _port_attrs[1] = &port->alternates.attr;
+  _port_attrs[2] = &port->source.attr;
+  _port_attrs[3] = &port->diren.attr;
+  _port_attrs[5] = NULL;
+
+
+  *port_attrs = _port_attrs;
+  return 0;
+}
+
 // probe driver
 static int aximux_probe(struct platform_device *pdev)
 {
-  struct device_node *node = pdev->dev.of_node;
+  struct device_node *node = pdev->dev.of_node, *child;
   struct aximux_device *dev;
   struct resource *io;
   int err = 0;
   unsigned int value = 0;
-  unsigned int iter = 0;
+  unsigned int iter = 0, iter2 = 0;
   struct device *buf_inst;
   dev_t devno = MKDEV(aximux_device_data->dev_major, aximux_device_data->available_instances);
+  unsigned int port_count = of_get_child_count(node);
 
   //allocate
   dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
@@ -237,33 +346,55 @@ static int aximux_probe(struct platform_device *pdev)
     dev->sig_count = SIGNAL_LIMIT;
   }
 
-  dev->signals = devm_kzalloc(&pdev->dev, dev->sig_count*sizeof(char*), GFP_KERNEL);
-  for (iter = 0; iter < dev->signals; iter++) {
-    dev->signals[iter] = devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT*sizeof(char), GFP_KERNEL);
+  if (port_count > dev->sig_count) {
+    printk(KERN_WARNING
+           "AXI Mux reports %d signals, but device-tree entry requests %d\n",
+           dev->sig_count, port_count);
+   port_count = dev->sig_count;
+  } else {
+    if (port_count < dev->sig_count) {
+      dev->sig_count = port_count;
+    }
   }
+  printk(KERN_INFO "AXI Mux with %d ports\n", port_count);
 
-  // TODO
-  /* dev->alt_sig_n = */
-  /*     devm_kzalloc(&pdev->dev, dev->sig_count * sizeof(char *), GFP_KERNEL); */
-  /* for (iter = 0; iter < dev->signals; iter++) { */
-  /*   dev->signals[iter] = */
-  /*       devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT * sizeof(char), GFP_KERNEL); */
-  /* } */
+  // allocate port structures
+  dev->ports = devm_kzalloc(&pdev->dev, dev->sig_count*sizeof(struct aximux_port), GFP_KERNEL);
+  iter = 0;
+  for_each_child_of_node(node, child) {
+    // read port signal name
+    dev->ports[iter].idx = iter;
+    dev->ports[iter].signal_name =
+      devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT * sizeof(char), GFP_KERNEL);
+    strncpy(dev->ports[iter].signal_name, child->name, SIGNAL_NAME_LIMIT);
 
-  // read signal names from properties
-  err = of_property_read_string_array(node, "signal-names", dev->signals, dev->sig_count);
-  if (err < 0) {
-    printk("cannot get signal names\n");
+    // read alternate signal names
+    value = of_property_read_string_array(child, "alternate_names", NULL, dev->alt_sig_n);
+    if (value < 0) {
+      printk(KERN_ERR "AXI Mux: cannot read alternate signals from entry %s\n", child->name);
+      return -ENOENT;
+    }
+    if (value > dev->alt_sig_n) {
+      printk(KERN_WARNING "AXI Mux: too many alternate names in entry %s\n", child->name);
+      value = dev->alt_sig_n;
+    }
+
+    // allocate alternate names
+    dev->ports[iter].alternate_count = value;
+    dev->ports[iter].alternate_names = devm_kzalloc(&pdev->dev, value*sizeof(char*), GFP_KERNEL);
+    for (iter2=0; iter2 < value; iter2++) {
+      dev->ports[iter].alternate_names[iter2] = devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT*sizeof(char), GFP_KERNEL);
+    }
+    // finally read
+    err = of_property_read_string_array(child, "alternate_names", dev->ports[iter].alternate_names, value);
+    if (err) {
+      return -ENOENT;
+    }
+
+    // TODO: default values, default directions
+
+    iter++;
   }
-  // TODO, annoying
-  /* for (iter = 0; iter < dev->alt_sig_n; iter++) { */
-  /*   char property_name[18]; */
-  /*   snprintf(property_name, 18, "alternate%d-names", iter); */
-  /*   err = of_property_read_string_array(node, property_name, dev->alt_signals, value); */
-  /*   if (err < 0) { */
-  /*     printk("cannot get alternate signal names\n"); */
-  /*   } */
-  /* } */
 
   //increment amount of available instances
   dev->instance_number = aximux_device_data->available_instances;
@@ -272,22 +403,20 @@ static int aximux_probe(struct platform_device *pdev)
   aximux_device_data->available_instances++;
 
   // populate sysfs entries depending on input width
-  for (iter = 0; iter < dev->input_width; iter++) {
-    struct device_attribute *src_attr = devm_kzalloc(&pdev->dev,
-                                                     sizeof(struct device_attribute),
-                                                     GFP_KERNEL);
-    char *attr_name = devm_kzalloc(&pdev->dev, 8*sizeof(char), GFP_KERNEL);
-    struct attribute attr = {
-      .name = attr_name,
-      .mode = S_IWUSR | S_IRUGO
-    };
-    snprintf(attr_name, 8, "source%d", iter);
-    src_attr->attr = attr;
-    src_attr->show = src_show;
-    src_attr->store = src_store;
-
+  for (iter = 0; iter < dev->sig_count; iter++) {
+    struct attribute_group *signal_group = devm_kzalloc(&pdev->dev, sizeof(struct attribute_group), GFP_KERNEL);
+    char *grp_name = devm_kzalloc(&pdev->dev, 8 * sizeof(char), GFP_KERNEL);
+    snprintf(grp_name, 8, "port%d", iter);
+    signal_group->name = grp_name;
+    // attributes: source, name, alternate_names
+    err = allocate_port_attributes(&pdev->dev, &dev->ports[iter], &signal_group->attrs);
+    if (err < 0) {
+      printk(KERN_ERR "AXI Mux: failed to allocate port attributes\n");
+      return err;
+    }
+    /* signal_group->attrs = port_attrs; */
     // populate attributes
-    aximux_attrs[iter] = &src_attr->attr;
+    aximux_inst_attr_groups[iter] = signal_group;
   }
 
   //sysfs entries
