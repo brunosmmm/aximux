@@ -5,7 +5,10 @@ OUTPUT_LOCATION ?= .
 GENERATED_FILES := aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).v axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT).v aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).tcl
 OUTPUT_FILES := $(addprefix $(OUTPUT_LOCATION)/,$(GENERATED_FILES))
 
-all: $(OUTPUT_FILES)
+all: $(OUTPUT_LOCATION) $(OUTPUT_FILES)
+
+$(OUTPUT_LOCATION):
+	mkdir -p $@
 
 $(OUTPUT_LOCATION)/aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).v: mux_gen.py
 	python mux_gen.py $(SIG_COUNT) $(ALT_SIG_COUNT) > $@
