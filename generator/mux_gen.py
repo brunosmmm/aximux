@@ -16,6 +16,7 @@ MUX_SIGNALS = 8
 AXI_ADDR_WIDTH = 7
 MUX_ALT_SIGNALS = 1
 MAX_ALT_SIGNALS = 15
+MAX_SIGNALS = 32
 
 if __name__ == "__main__":
 
@@ -32,7 +33,11 @@ if __name__ == "__main__":
     # sanity checks
     if args.alt_signal_count > MAX_ALT_SIGNALS:
         print("ERROR: alternate signals exceed maximum")
-        exit(0)
+        exit(1)
+
+    if args.signal_count > MAX_SIGNALS:
+        print("ERROR: signals exceed maximum")
+        exit(1)
 
     if args.signal_count < 1:
         print("ERROR: invalid signal count")
