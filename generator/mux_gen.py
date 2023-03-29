@@ -73,7 +73,7 @@ if __name__ == "__main__":
         ]
 
         @HDLModule(
-            "axi_mux",
+            f"aximux__{mux_signals}__{alternate_signals}",
             ports=(
                 AXI4LiteSlaveIf.instantiate(
                     "s_axi",

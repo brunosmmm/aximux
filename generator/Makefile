@@ -1,14 +1,18 @@
 SIG_COUNT ?= 8
 ALT_SIG_COUNT ?= 4
 
-all: axi_mux.v axi4liteslave.v
+OUTPUT_LOCATION ?= .
+GENERATED_FILES := aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).v axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT).v
+OUTPUT_FILES := $(addprefix $(OUTPUT_LOCATION)/,$(GENERATED_FILES))
 
-axi_mux.v: mux_gen.py
+all: $(OUTPUT_FILES)
+
+$(OUTPUT_LOCATION)/aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).v: mux_gen.py
 	python mux_gen.py $(SIG_COUNT) $(ALT_SIG_COUNT) > $@
 
-axi4liteslave.v: axislave.mm
+$(OUTPUT_LOCATION)/axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT).v: axislave.mm
 	axi_slave_builder $< --replace-param mux_signals=$(SIG_COUNT) alt_signals=$(ALT_SIG_COUNT)\
-                       --modname axi4liteslave > $@
+                       --modname axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT) > $@
 
 clean:
-	rm -rf axi_mux.v axi4liteslave.v
+	rm -rf $(OUTPUT_FILES)
