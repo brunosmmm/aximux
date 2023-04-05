@@ -200,7 +200,9 @@ if __name__ == "__main__":
                 ]
             )
             axi_slave = AXI4LiteSlave(
-                "axislave", extra_ports=extra_slave_ports
+                "axislave",
+                extra_ports=extra_slave_ports,
+                module_name=f"axi4liteslave__{mux_signals}__{alternate_signals}",
             )
             axi_slave.attach_parameter_value("C_S_AXI_ADDR_WIDTH", 6)
             axi_slave.attach_parameter_value("C_S_AXI_DATA_WIDTH", 32)
