@@ -180,6 +180,8 @@ if __name__ == "__main__":
                         )
                     )
 
+            # FIXME: address calcualtion is broken
+            #        both address width and selector for read/write are wrong
             # TODO: add axi_slave instance
             extra_slave_ports = (
                 [
