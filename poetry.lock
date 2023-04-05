@@ -207,8 +207,8 @@ textX = "2.3.0"
 [package.source]
 type = "git"
 url = "https://github.com/brunosmmm/hdltools"
-reference = "65d5d020ea5d2d1893b190064fa3d33cb4298587"
-resolved_reference = "65d5d020ea5d2d1893b190064fa3d33cb4298587"
+reference = "463412cf6a72456acc8cb99569e7dc9c9d472f6d"
+resolved_reference = "463412cf6a72456acc8cb99569e7dc9c9d472f6d"
 
 [[package]]
 name = "iniconfig"
@@ -341,4 +341,4 @@ test = ["pytest (>=6.0.0)"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "d920424a7989a7a91423148b60f6b66668614543942ec2f2056182e2cb7d72c0"
+content-hash = "0140801ffca70029c2675875bf0058582b234934740311fb8a19e21362604359"

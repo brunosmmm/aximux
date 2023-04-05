@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-hdltools = {git = "https://github.com/brunosmmm/hdltools", rev = "65d5d020ea5d2d1893b190064fa3d33cb4298587"}
+hdltools = {git = "https://github.com/brunosmmm/hdltools", rev = "463412cf6a72456acc8cb99569e7dc9c9d472f6d"}
 
 
 [tool.poetry.group.dev.dependencies]
