@@ -10,6 +10,8 @@ from cocotbext.axi import (
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 
+REG_MUXINFO = 0x80
+
 
 class AxiMuxTb:
     """Test bench."""
@@ -22,6 +24,9 @@ class AxiMuxTb:
         self.log.setLevel(logging.DEBUG)
 
         s_clk = int(os.getenv("S_CLK", "10"))
+        # environment should have parameters, if not we can read from register
+        self.SIG_COUNT = int(os.getenv("SIG_COUNT", 8))
+        self.ALT_SIG_COUNT = int(os.getenv("ALT_SIG_COUNT", 4))
 
         cocotb.start_soon(Clock(dut.s_axi_aclk, s_clk, units="ns").start())
 
@@ -43,6 +48,23 @@ class AxiMuxTb:
         self.dut.s_axi_aresetn.value = 1
         for k in range(10):
             await RisingEdge(self.dut.s_axi_aclk)
+
+
+@cocotb.test()
+async def test_parameters(dut):
+    """Test."""
+
+    tb = AxiMuxTb(dut)
+
+    await tb.reset()
+    for _ in range(10):
+        await RisingEdge(tb.dut.s_axi_aclk)
+
+    ret = await tb.from_host.read(REG_MUXINFO, 4)
+    sig_count = ret.data[0]
+    alt_sig_count = ret.data[1]
+    assert sig_count == tb.SIG_COUNT
+    assert alt_sig_count == tb.ALT_SIG_COUNT
 
 
 @cocotb.test()
