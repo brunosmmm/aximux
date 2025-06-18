@@ -180,9 +180,14 @@ if __name__ == "__main__":
                         )
                     )
 
-            # FIXME: address calcualtion is broken
-            #        both address width and selector for read/write are wrong
-            # TODO: add axi_slave instance
+            # Calculate proper AXI address width
+            # Need to address: mux_signals SRCSEL registers (0x00-0x1F) + MUXINFO register (0x80)
+            # Each register is 32-bit (4 bytes), so byte addresses are reg_num * 4
+            # MUXINFO is at byte address 0x80 (128 decimal)
+            max_byte_addr = max(mux_signals * 4, 0x80)
+            # Add 4 for the MUXINFO register itself
+            required_addr_width = clog2(max_byte_addr + 4)
+            
             extra_slave_ports = (
                 [
                     output_port(
@@ -206,7 +211,7 @@ if __name__ == "__main__":
                 extra_ports=extra_slave_ports,
                 module_name=f"axi4liteslave__{mux_signals}__{alternate_signals}",
             )
-            axi_slave.attach_parameter_value("C_S_AXI_ADDR_WIDTH", 6)
+            axi_slave.attach_parameter_value("C_S_AXI_ADDR_WIDTH", required_addr_width)
             axi_slave.attach_parameter_value("C_S_AXI_DATA_WIDTH", 32)
             axi_slave.connect_port("s_axi", "s_axi")
             # capitalize ports
