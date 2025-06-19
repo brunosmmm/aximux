@@ -53,6 +53,14 @@ if __name__ == "__main__":
         if alternate_signals < 1:
             raise RuntimeError("mux must have at least one alternate signal")
 
+        # Calculate proper AXI address width early
+        # Need to address: mux_signals SRCSEL registers + MUXINFO register (0x80)
+        # Each register is 32-bit (4 bytes), so byte addresses are reg_num * 4
+        # MUXINFO is at byte address 0x80 (128 decimal)
+        max_byte_addr = max(mux_signals * 4, 0x80)
+        # Add 4 for the MUXINFO register itself
+        required_addr_width = clog2(max_byte_addr + 4)
+
         # direction control ports
         dir_ports = [
             input_port(f"sig{sig}ctl{alt}")
@@ -78,7 +86,7 @@ if __name__ == "__main__":
                 AXI4LiteSlaveIf.instantiate(
                     "s_axi",
                     data_width=AXI_DATA_WIDTH,
-                    addr_width=AXI_ADDR_WIDTH,
+                    addr_width=required_addr_width,
                 ),
                 input_port("sig_in", mux_signals),
                 output_port("sig_out", mux_signals),
@@ -125,16 +133,26 @@ if __name__ == "__main__":
                 ]
             )
 
+            # Create intermediate signals to work around HDLTools slicing issue
+            for mux in range(0, mux_signals):
+                mod.add(HDLSignal("comb", f"sig_in_bit{mux}", size=1))
+            
             @HDLBlock(mod)
             @ParallelBlock()
-            def incoming_gen(incoming, src_sel, short_sel, sig_in, index):
+            def incoming_gen(incoming, src_sel, short_sel, sig_in_bit, index):
                 """Generate incoming signal."""
                 incoming = (
-                    sig_in
+                    sig_in_bit
                     if src_sel == index
-                    else (sig_in if short_sel else 0)
+                    else (sig_in_bit if short_sel else 0)
                 )
 
+            # Assign intermediate signals
+            _in_port = mod.get_signal_or_port("sig_in")
+            for mux in range(0, mux_signals):
+                sig_in_bit = mod.get_signal_or_port(f"sig_in_bit{mux}")
+                mod.add(sig_in_bit.assign(_in_port[mux]))
+            
             # generate signals
             for mux in range(0, mux_signals):
                 dir_sig = mod.get_signal_or_port("sig_dir")
@@ -152,7 +170,6 @@ if __name__ == "__main__":
                     mod.get_signal_or_port(f"sig{mux}outgoing{alt}")
                     for alt in range(0, alternate_signals + 1)
                 ]
-                _in_port = mod.get_signal_or_port("sig_in")
                 incoming_signals = [
                     mod.get_signal_or_port(f"sig{mux}incoming{alt}")
                     for alt in range(0, alternate_signals + 1)
@@ -169,25 +186,18 @@ if __name__ == "__main__":
                 mod.add([get_multiplexer(out_sig[mux], sel_sig, *_out_ports)])
 
                 # input signal routing
+                sig_in_bit = mod.get_signal_or_port(f"sig_in_bit{mux}")
                 for idx, incoming_signal in enumerate(incoming_signals):
                     mod.extend(
                         *incoming_gen(
                             incoming=incoming_signal,
                             src_sel=sel_sig,
                             short_sel=short_sig,
-                            sig_in=_in_port[mux],
+                            sig_in_bit=sig_in_bit,
                             index=idx,
                         )
                     )
 
-            # Calculate proper AXI address width
-            # Need to address: mux_signals SRCSEL registers (0x00-0x1F) + MUXINFO register (0x80)
-            # Each register is 32-bit (4 bytes), so byte addresses are reg_num * 4
-            # MUXINFO is at byte address 0x80 (128 decimal)
-            max_byte_addr = max(mux_signals * 4, 0x80)
-            # Add 4 for the MUXINFO register itself
-            required_addr_width = clog2(max_byte_addr + 4)
-            
             extra_slave_ports = (
                 [
                     output_port(

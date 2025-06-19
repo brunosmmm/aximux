@@ -1,7 +1,7 @@
 """Test axi mux."""
+
 import cocotb
 import os
-import itertools
 import logging
 from cocotbext.axi import (
     AxiLiteBus,
@@ -61,8 +61,14 @@ async def test_parameters(dut):
         await RisingEdge(tb.dut.s_axi_aclk)
 
     ret = await tb.from_host.read(REG_MUXINFO, 4)
+
+    # Wait a few more cycles to see if signals update
+    for i in range(5):
+        await RisingEdge(tb.dut.s_axi_aclk)
+
     sig_count = ret.data[0]
     alt_sig_count = ret.data[1]
+
     assert sig_count == tb.SIG_COUNT
     assert alt_sig_count == tb.ALT_SIG_COUNT
 
