@@ -150,11 +150,18 @@ static ssize_t src_store(struct device* dev, struct device_attribute* attr,
   struct aximux_device* drv = dev_get_drvdata(dev);
   struct aximux_port* port;
   unsigned int value = 0;
+  int ret;
 
   // hack to find port #
-
-  //get value
   port = container_of(attr, struct aximux_port, source);
+
+  // get value from user input
+  ret = kstrtouint(buf, 0, &value);
+  if (ret) {
+    printk(KERN_ERR "AXI Mux: invalid value '%s' for port %d (%s)\n",
+           buf, port->idx, port->signal_name);
+    return ret;
+  }
 
   if (value > port->alternate_count)
     {
@@ -197,6 +204,25 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
   return sprintf(buf, "%s\n", port->signal_name);
 }
 
+static ssize_t alternates_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct aximux_port *port;
+  int i;
+  int pos = 0;
+
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, alternates);
+
+  for (i = 0; i < port->alternate_count; i++) {
+    if (i > 0) {
+      pos += sprintf(buf + pos, " ");
+    }
+    pos += sprintf(buf + pos, "%s", port->alternate_names[i] ? port->alternate_names[i] : "unknown");
+  }
+  pos += sprintf(buf + pos, "\n");
+
+  return pos;
+}
+
 static ssize_t diren_show(struct device *dev, struct device_attribute *attr,
                          char *buf) {
   struct aximux_port *port;
@@ -219,15 +245,101 @@ static ssize_t diren_store(struct device *dev, struct device_attribute *attr,
   struct aximux_port *port;
   struct aximux_device *drv = dev_get_drvdata(dev);
   unsigned int port_reg = 0;
-
-  // TODO compare input
+  bool enable_sw_control;
+  int ret;
 
   // hack to find port #
-  port = container_of(attr, struct aximux_port, source);
+  port = container_of(attr, struct aximux_port, diren);
+
+  // Parse input - accept "SW"/"1" for software control, "HW"/"0" for hardware control
+  if (strncmp(buf, "SW", 2) == 0 || strncmp(buf, "sw", 2) == 0) {
+    enable_sw_control = true;
+  } else if (strncmp(buf, "HW", 2) == 0 || strncmp(buf, "hw", 2) == 0) {
+    enable_sw_control = false;
+  } else {
+    // Try parsing as number
+    unsigned int value;
+    ret = kstrtouint(buf, 0, &value);
+    if (ret) {
+      printk(KERN_ERR "AXI Mux: invalid direction enable value '%s' for port %d (%s)\n",
+             buf, port->idx, port->signal_name);
+      return ret;
+    }
+    enable_sw_control = (value != 0);
+  }
+
+  // Read current register value
+  port_reg = reg_read(drv, port->idx);
+  
+  // Clear the direction enable bit
+  port_reg &= ~(1 << AXIMUX_REGOFF_DIREN);
+  
+  // Set the direction enable bit if software control is requested
+  if (enable_sw_control) {
+    port_reg |= (1 << AXIMUX_REGOFF_DIREN);
+  }
+  
+  // Write back the updated register
+  reg_write(drv, port->idx, port_reg);
+
+  return count;
+}
+
+static ssize_t dirctl_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct aximux_device *drv = dev_get_drvdata(dev);
+  struct aximux_port *port;
+  unsigned int port_reg = 0;
+  bool is_output;
+
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, dirctl);
 
   port_reg = reg_read(drv, port->idx);
-  port_reg &=  ~(1 << AXIMUX_REGOFF_DIREN);
-  // TODO do something, writeback
+  is_output = (port_reg >> AXIMUX_REGOFF_DIRCTL) & 1;
+
+  return sprintf(buf, "%s\n", is_output ? "OUT" : "IN");
+}
+
+static ssize_t dirctl_store(struct device *dev, struct device_attribute *attr,
+                            const char *buf, size_t count) {
+  struct aximux_port *port;
+  struct aximux_device *drv = dev_get_drvdata(dev);
+  unsigned int port_reg = 0;
+  bool set_output;
+  int ret;
+
+  // hack to find port #
+  port = container_of(attr, struct aximux_port, dirctl);
+
+  // Parse input - accept "OUT"/"1" for output, "IN"/"0" for input
+  if (strncmp(buf, "OUT", 3) == 0 || strncmp(buf, "out", 3) == 0) {
+    set_output = true;
+  } else if (strncmp(buf, "IN", 2) == 0 || strncmp(buf, "in", 2) == 0) {
+    set_output = false;
+  } else {
+    // Try parsing as number
+    unsigned int value;
+    ret = kstrtouint(buf, 0, &value);
+    if (ret) {
+      printk(KERN_ERR "AXI Mux: invalid direction value '%s' for port %d (%s)\n",
+             buf, port->idx, port->signal_name);
+      return ret;
+    }
+    set_output = (value != 0);
+  }
+
+  // Read current register value
+  port_reg = reg_read(drv, port->idx);
+  
+  // Clear the direction control bit
+  port_reg &= ~(1 << AXIMUX_REGOFF_DIRCTL);
+  
+  // Set the direction control bit if output is requested
+  if (set_output) {
+    port_reg |= (1 << AXIMUX_REGOFF_DIRCTL);
+  }
+  
+  // Write back the updated register
   reg_write(drv, port->idx, port_reg);
 
   return count;
@@ -262,13 +374,16 @@ int allocate_port_attributes(struct device *dev, struct aximux_port *port,
     .attr = {.name = "name", .mode = S_IRUGO},
     .show = name_show};
   struct device_attribute alternate = {
-    .attr = {.name = "alternates", .mode = S_IRUGO}};
+    .attr = {.name = "alternates", .mode = S_IRUGO},
+    .show = alternates_show};
   struct device_attribute diren = {
     .attr = {.name = "direction_control", .mode = S_IWUSR | S_IRUGO},
     .show = diren_show,
     .store = diren_store};
   struct device_attribute dirctl = {
-    .attr = {.name = "direction", .mode = S_IWUSR | S_IRUGO}};
+    .attr = {.name = "direction", .mode = S_IWUSR | S_IRUGO},
+    .show = dirctl_show,
+    .store = dirctl_store};
   struct device_attribute source = {
     .attr = {.name = "source", .mode = S_IWUSR | S_IRUGO},
     .show = src_show,

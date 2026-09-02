@@ -11,14 +11,14 @@ $(OUTPUT_LOCATION):
 	mkdir -p $@
 
 $(OUTPUT_LOCATION)/aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).v: mux_gen.py
-	poetry run python mux_gen.py $(SIG_COUNT) $(ALT_SIG_COUNT) > $@
+	uv run python mux_gen.py $(SIG_COUNT) $(ALT_SIG_COUNT) > $@
 
 $(OUTPUT_LOCATION)/aximux__$(SIG_COUNT)__$(ALT_SIG_COUNT).tcl: aximux.tcl
 	sed 's/%SIG_COUNT%/$(SIG_COUNT)/' $< > $@
 	sed -i 's/%ALT_COUNT%/$(ALT_SIG_COUNT)/' $@
 
 $(OUTPUT_LOCATION)/axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT).v: axislave.mm
-	poetry run axi_slave_builder $< --param-replace mux_signals=$(SIG_COUNT) alt_signals=$(ALT_SIG_COUNT)\
+	uv run axi_slave_builder $< --param-replace mux_signals=$(SIG_COUNT) alt_signals=$(ALT_SIG_COUNT)\
                        --modname axi4liteslave__$(SIG_COUNT)__$(ALT_SIG_COUNT) > $@
 
 clean:
