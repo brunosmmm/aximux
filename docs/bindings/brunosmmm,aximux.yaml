@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/brunosmmm,aximux.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: AXIMUX AXI soft-IP pin controller
+
+maintainers:
+  - Bruno Morais <brunosmmm@gmail.com>
+
+description: |
+  Pin controller for the AXIMUX PL soft IP. Each signal has a SRCSEL register
+  with source select (pinmux) plus SHORT / DIREN / DIRCTL (pinconf).
+
+  Child nodes with a `reg` property describe pins. Optional child nodes with
+  `brunosmmm,pins` describe multi-pin groups. Board/app overlays may add
+  groups, functions, and consumer pinctrl states without rebuilding the module.
+
+properties:
+  compatible:
+    oneOf:
+      - const: brunosmmm,aximux-2.0
+      - items:
+          - const: brunosmmm,aximux-2.0
+          - const: axi-mux-2.0
+      - const: axi-mux-2.0
+
+  reg:
+    maxItems: 1
+
+  "#pinctrl-cells":
+    const: 0
+
+patternProperties:
+  "^pin@[0-9a-f]+$":
+    type: object
+    additionalProperties: false
+    properties:
+      reg:
+        description: Signal / SRCSEL index
+        maxItems: 1
+      function-names:
+        description: |
+          Ordered list of function names for SRC values 0..N-1 on this pin.
+          Also accepted as legacy `alternate-names`.
+        $ref: /schemas/types.yaml#/definitions/string-array
+      alternate-names:
+        $ref: /schemas/types.yaml#/definitions/string-array
+    required:
+      - reg
+
+  "-grp$":
+    type: object
+    additionalProperties: false
+    description: Optional multi-pin group
+    properties:
+      brunosmmm,pins:
+        description: Pin names (child node names) in this group
+        $ref: /schemas/types.yaml#/definitions/string-array
+      brunosmmm,mux:
+        description: SRC value for each pin in brunosmmm,pins order
+        $ref: /schemas/types.yaml#/definitions/uint32-array
+      brunosmmm,function:
+        description: Function name selecting this group (defaults to node name)
+        $ref: /schemas/types.yaml#/definitions/string
+    required:
+      - brunosmmm,pins
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: true
+
+examples:
+  - |
+    aximux: pinctrl@43c00000 {
+        compatible = "brunosmmm,aximux-2.0";
+        reg = <0x43c00000 0x1000>;
+
+        pin0: pin@0 {
+            reg = <0>;
+            function-names = "gpio", "uart_tx", "spi_mosi";
+        };
+
+        pin1: pin@1 {
+            reg = <1>;
+            function-names = "gpio", "uart_rx", "spi_miso";
+        };
+
+        uart0_grp: uart0-grp {
+            brunosmmm,pins = "pin@0", "pin@1";
+            brunosmmm,function = "uart0";
+            brunosmmm,mux = <1 1>;
+        };
+    };

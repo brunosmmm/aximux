@@ -1,7 +1,7 @@
 ---
 id: AXIMUX-0002
 title: AXIMUX Linux pinctrl driver with DT/runtime remux
-status: accepted
+status: in-progress
 owner: bmorais
 created: 2026-09-02
 updated: 2026-09-02
@@ -113,6 +113,18 @@ Implement **one** Linux pin controller driver for the AXIMUX PL IP (structurally
 ## Clock Log
 
 CLOCK-IN: [2026-09-02 16:47]
+CLOCK-OUT: [2026-09-02 16:50]
+CLOCK-IN: [2026-09-02 21:04]
+CLOCK-OUT: [2026-09-02 21:20]
+
+## Implementation notes (2026-09-02)
+
+Shipped in-tree (still `in-progress` until on-target pinctrl verification):
+
+- `driver/aximux.c` rewritten as pinctrl/pinmux/pinconf provider; writeable sysfs mux removed; RO `srcsel` sysfs retained.
+- Binding `docs/bindings/brunosmmm,aximux.yaml`, example `driver/aximux.dtsi`, overlay sketch `driver/aximux-overlay-example.dtsi`.
+- Host cocotb matrix (AXIMUX-0001) green after change (HDL untouched).
+- Kernel module build not exercised here (no `KERNEL_SRC` / headers on this host).
 
 ## Rollout / migration
 

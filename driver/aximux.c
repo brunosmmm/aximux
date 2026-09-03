@@ -1,639 +1,708 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * AXIMUX — AXI soft-IP pin controller (PL mux)
+ *
+ * Pinmux programs SRCSEL.SRC. Pinconf covers SHORT / DIREN / DIRCTL.
+ * Pins/groups/functions come from DT (1-pin and multi-pin). Runtime remux uses
+ * pinctrl states; lab freeform uses debugfs pinmux-select. Sysfs exposes a
+ * read-only "srcsel" dump only (no writeable mux API).
+ */
+
+#include <linux/err.h>
 #include <linux/io.h>
 #include <linux/module.h>
-#include <linux/bitops.h>
-#include <linux/init.h>
-#include <linux/interrupt.h>
-#include <linux/printk.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
-#include <linux/device.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
-#include <linux/ioctl.h>
-#include <linux/cdev.h>
-#include <linux/fs.h>
-#include <asm/uaccess.h>
+
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/pinconf-generic.h>
 #include <linux/pinctrl/pinctrl.h>
+#include <linux/pinctrl/pinmux.h>
 
-#define DRIVER_NAME "aximux"
+#define DRIVER_NAME		"aximux"
 
-#define ADDR_LSB 2
-#define AXIMUX_REG_OFFSET(x) (x<<ADDR_LSB)
+#define AXIMUX_REG(n)		((n) << 2)
+#define AXIMUX_REG_MUXINFO	0x80
 
-//registers
-#define AXIMUX_REG_MUXINFO 0x80
-#define AXIMUX_REGOFF_SEL 0 ///< Source select register
-#define AXIMUX_REGOFF_SHORT 5 ///< Short select register
-#define AXIMUX_REGOFF_DIREN 6
-#define AXIMUX_REGOFF_DIRCTL 7
+#define AXIMUX_SRC_MASK		GENMASK(3, 0)
+#define AXIMUX_SHORT_BIT	BIT(5)
+#define AXIMUX_DIREN_BIT	BIT(6)
+#define AXIMUX_DIRCTL_BIT	BIT(7)
 
-//register bits
-#define AXIMUX_SEL_MASK 0xFF
+#define AXIMUX_MAX_PINS		32
+#define AXIMUX_MAX_ALTS		15
 
-//driver flags
-#define AXIMUX_FLAGS_INITIALIZED 0x01
-#define AXIMUX_FLAGS_MODIFIED 0x02
+#define AXIMUX_CFG_SHORT	(PIN_CONFIG_END + 1)
+#define AXIMUX_CFG_DIR_SW	(PIN_CONFIG_END + 2)
+#define AXIMUX_CFG_DIR_OUT	(PIN_CONFIG_END + 3)
 
-//other
-#define AXIMUX_MAX_INSTANCES 32
-
-//debug
-#define AXIMUX_DEBUG 1
-
-#define SIGNAL_NAME_LIMIT 16
-#define SIGNAL_LIMIT 32
-#define SIGNAL_ALT_LIMIT 16
-
-#define PORT_HAS_HW_CONTROL 0x01
-#define PORT_HAS_SW_CONTROL 0x02
-#define PORT_HWSW_CONTROL 0x08
-#define PORT_SW_DIR 0x04
-
-struct aximux_port {
-  unsigned int idx;
-  char *signal_name;
-  const char **alternate_names;
-
-  unsigned int alternate_count;
-
-  // TODO: default states via device-tree
-  unsigned int default_source;
-  unsigned int default_direction;
-
-  // direction control flags
-  unsigned int direction_flags;
-
-  // HACK: store attrs here for reference later, there are 5 attrs
-  struct device_attribute source;
-  struct device_attribute name;
-  struct device_attribute diren;
-  struct device_attribute dirctl;
-  struct device_attribute alternates;
+struct aximux_pin {
+	unsigned number;
+	const char *name;
+	unsigned nfuncs;
+	const char **func_names;
 };
 
-//ualu instance struct
-struct aximux_device
-{
-  void __iomem *regs;
-  struct device *dev;
-  struct device *proxy_dev;
-  struct cdev cdev;
-
-  // hardwired parameters
-  u32 alt_sig_n;
-  u32 sig_count;
-
-  // runtime flags
-  u32 driver_flags;
-  u32 instance_number;
-
-  //signals
-  struct aximux_port *ports;
+struct aximux_group {
+	const char *name;
+	const unsigned *pins;
+	unsigned npins;
 };
 
-//global driver data structure
-struct aximux_instance
-{
-  //driver instances
-  struct aximux_device* driver_instances[AXIMUX_MAX_INSTANCES];
-
-  u32 available_instances;
-  u32 dev_major;
+struct aximux_function {
+	const char *name;
+	const char **groups;
+	unsigned ngroups;
+	unsigned **mux_vals;
+	unsigned *mux_npins;
 };
 
-//bookeeping
-static struct aximux_instance* aximux_device_data;
+struct aximux {
+	struct device *dev;
+	void __iomem *regs;
+	struct pinctrl_dev *pctl;
 
-/* Read / Write Registers */
-static inline void reg_write(struct aximux_device *dev, u32 reg, u32 value)
-{
-  iowrite32(value, dev->regs + AXIMUX_REG_OFFSET(reg));
-}
+	unsigned npins;
+	unsigned nalts;
+	struct aximux_pin *pins;
+	struct pinctrl_pin_desc *pindescs;
 
-static inline u32 reg_read(struct aximux_device *dev, u32 reg)
-{
-  return ioread32(dev->regs + AXIMUX_REG_OFFSET(reg));
-}
+	unsigned ngroups;
+	struct aximux_group *groups;
 
-/* Perform Low-level device operations */
-void aximux_set_src(struct aximux_device* dev, unsigned int port, unsigned int source)
-{
-  unsigned int cursrc = 0;
-  unsigned int regval = 0;
-  if (!dev) {
-    return;
-  }
-  // register offset is port #
-  // maximum 4 bits for source (16 alternates)
-  regval = reg_read(dev, port);
-  cursrc = regval & 0x0F;
-  regval &= ~(0x0F);
-  regval |= source & 0xF;
-  reg_write(dev, port, regval);
-}
-EXPORT_SYMBOL(aximux_set_src);
-
-void aximux_get_src(struct aximux_device*dev, unsigned int port, unsigned int *source)
-{
-  if (!source || !dev)
-    {
-      return;
-    }
-  *source = reg_read(dev, port) & 0x0F;
-}
-EXPORT_SYMBOL(aximux_get_src);
-
-/* SYS FS */
-static ssize_t src_store(struct device* dev, struct device_attribute* attr,
-                         const char* buf, size_t count)
-{
-  struct aximux_device* drv = dev_get_drvdata(dev);
-  struct aximux_port* port;
-  unsigned int value = 0;
-  int ret;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, source);
-
-  // get value from user input
-  ret = kstrtouint(buf, 0, &value);
-  if (ret) {
-    printk(KERN_ERR "AXI Mux: invalid value '%s' for port %d (%s)\n",
-           buf, port->idx, port->signal_name);
-    return ret;
-  }
-
-  if (value > port->alternate_count)
-    {
-      printk(KERN_ERR "AXI Mux: port %d (%s) only has %d alternates\n",
-             port->idx, port->signal_name, port->alternate_count);
-      return -EINVAL;
-    }
-
-  aximux_set_src(drv, port->idx, value);
-
-  return count;
-}
-
-static ssize_t src_show(struct device* dev, struct device_attribute* attr, char* buf)
-{
-  struct aximux_device* drv = dev_get_drvdata(dev);
-  struct aximux_port* port;
-  unsigned int cur_src = 0;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, source);
-
-  aximux_get_src(drv, port->idx, &cur_src);
-  if (cur_src > port->alternate_count) {
-      printk(KERN_ERR "AXI Mux: got invalid value from port %d (%s) selector\n", port->idx,
-             port->signal_name);
-      return -EINVAL;
-  }
-
-  return sprintf(buf, "%u\n", cur_src);
-}
-
-static ssize_t name_show(struct device *dev, struct device_attribute *attr,
-                        char *buf) {
-  struct aximux_port *port;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, source);
-
-  return sprintf(buf, "%s\n", port->signal_name);
-}
-
-static ssize_t alternates_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct aximux_port *port;
-  int i;
-  int pos = 0;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, alternates);
-
-  for (i = 0; i < port->alternate_count; i++) {
-    if (i > 0) {
-      pos += sprintf(buf + pos, " ");
-    }
-    pos += sprintf(buf + pos, "%s", port->alternate_names[i] ? port->alternate_names[i] : "unknown");
-  }
-  pos += sprintf(buf + pos, "\n");
-
-  return pos;
-}
-
-static ssize_t diren_show(struct device *dev, struct device_attribute *attr,
-                         char *buf) {
-  struct aximux_port *port;
-  struct aximux_device *drv = dev_get_drvdata(dev);
-  unsigned int port_reg = 0;
-  // TODO: confirm if HW is 1 / SW 0
-  unsigned char is_hw;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, source);
-
-  port_reg = reg_read(drv, port->idx);
-  is_hw = (port_reg & (1<<AXIMUX_REGOFF_DIREN));
-
-  return sprintf(buf, "%s\n", is_hw ? "HW" : "SW");
-}
-
-static ssize_t diren_store(struct device *dev, struct device_attribute *attr,
-                           const char *buf, size_t count) {
-  struct aximux_port *port;
-  struct aximux_device *drv = dev_get_drvdata(dev);
-  unsigned int port_reg = 0;
-  bool enable_sw_control;
-  int ret;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, diren);
-
-  // Parse input - accept "SW"/"1" for software control, "HW"/"0" for hardware control
-  if (strncmp(buf, "SW", 2) == 0 || strncmp(buf, "sw", 2) == 0) {
-    enable_sw_control = true;
-  } else if (strncmp(buf, "HW", 2) == 0 || strncmp(buf, "hw", 2) == 0) {
-    enable_sw_control = false;
-  } else {
-    // Try parsing as number
-    unsigned int value;
-    ret = kstrtouint(buf, 0, &value);
-    if (ret) {
-      printk(KERN_ERR "AXI Mux: invalid direction enable value '%s' for port %d (%s)\n",
-             buf, port->idx, port->signal_name);
-      return ret;
-    }
-    enable_sw_control = (value != 0);
-  }
-
-  // Read current register value
-  port_reg = reg_read(drv, port->idx);
-  
-  // Clear the direction enable bit
-  port_reg &= ~(1 << AXIMUX_REGOFF_DIREN);
-  
-  // Set the direction enable bit if software control is requested
-  if (enable_sw_control) {
-    port_reg |= (1 << AXIMUX_REGOFF_DIREN);
-  }
-  
-  // Write back the updated register
-  reg_write(drv, port->idx, port_reg);
-
-  return count;
-}
-
-static ssize_t dirctl_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct aximux_device *drv = dev_get_drvdata(dev);
-  struct aximux_port *port;
-  unsigned int port_reg = 0;
-  bool is_output;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, dirctl);
-
-  port_reg = reg_read(drv, port->idx);
-  is_output = (port_reg >> AXIMUX_REGOFF_DIRCTL) & 1;
-
-  return sprintf(buf, "%s\n", is_output ? "OUT" : "IN");
-}
-
-static ssize_t dirctl_store(struct device *dev, struct device_attribute *attr,
-                            const char *buf, size_t count) {
-  struct aximux_port *port;
-  struct aximux_device *drv = dev_get_drvdata(dev);
-  unsigned int port_reg = 0;
-  bool set_output;
-  int ret;
-
-  // hack to find port #
-  port = container_of(attr, struct aximux_port, dirctl);
-
-  // Parse input - accept "OUT"/"1" for output, "IN"/"0" for input
-  if (strncmp(buf, "OUT", 3) == 0 || strncmp(buf, "out", 3) == 0) {
-    set_output = true;
-  } else if (strncmp(buf, "IN", 2) == 0 || strncmp(buf, "in", 2) == 0) {
-    set_output = false;
-  } else {
-    // Try parsing as number
-    unsigned int value;
-    ret = kstrtouint(buf, 0, &value);
-    if (ret) {
-      printk(KERN_ERR "AXI Mux: invalid direction value '%s' for port %d (%s)\n",
-             buf, port->idx, port->signal_name);
-      return ret;
-    }
-    set_output = (value != 0);
-  }
-
-  // Read current register value
-  port_reg = reg_read(drv, port->idx);
-  
-  // Clear the direction control bit
-  port_reg &= ~(1 << AXIMUX_REGOFF_DIRCTL);
-  
-  // Set the direction control bit if output is requested
-  if (set_output) {
-    port_reg |= (1 << AXIMUX_REGOFF_DIRCTL);
-  }
-  
-  // Write back the updated register
-  reg_write(drv, port->idx, port_reg);
-
-  return count;
-}
-
-static const struct attribute_group* aximux_inst_attr_groups[SIGNAL_LIMIT] = {
-  NULL,
+	unsigned nfunctions;
+	struct aximux_function *functions;
 };
 
-static struct class aximux_class = {
-  .name = "aximux",
-  .owner = THIS_MODULE,
-};
-
-//export some functions
-int aximux_instance_count(void)
+static u32 aximux_read(struct aximux *amx, unsigned pin)
 {
-  return aximux_device_data->available_instances;
-}
-EXPORT_SYMBOL(aximux_instance_count);
-
-static struct of_device_id aximux_of_ids[] = {
-  { .compatible = "axi-mux-2.0", },
-  {}
-};
-MODULE_DEVICE_TABLE(of, aximux_of_ids);
-
-int allocate_port_attributes(struct device *dev, struct aximux_port *port,
-                             struct attribute ***port_attrs)
-{
-  struct device_attribute name = {
-    .attr = {.name = "name", .mode = S_IRUGO},
-    .show = name_show};
-  struct device_attribute alternate = {
-    .attr = {.name = "alternates", .mode = S_IRUGO},
-    .show = alternates_show};
-  struct device_attribute diren = {
-    .attr = {.name = "direction_control", .mode = S_IWUSR | S_IRUGO},
-    .show = diren_show,
-    .store = diren_store};
-  struct device_attribute dirctl = {
-    .attr = {.name = "direction", .mode = S_IWUSR | S_IRUGO},
-    .show = dirctl_show,
-    .store = dirctl_store};
-  struct device_attribute source = {
-    .attr = {.name = "source", .mode = S_IWUSR | S_IRUGO},
-    .show = src_show,
-    .store = src_store};
-
-  struct attribute *_port_attrs[6];
-
-  // hide attributes if HW control only
-  if ((port->direction_flags & PORT_HAS_HW_CONTROL) && (!(port->direction_flags & PORT_HAS_SW_CONTROL))) {
-    diren.attr.mode = S_IRUGO;
-    diren.store = NULL;
-    _port_attrs[4] = NULL;
-  } else {
-    if (port->direction_flags & PORT_HAS_SW_CONTROL) {
-      port->dirctl = dirctl;
-      _port_attrs[4] = &port->dirctl.attr;
-    }
-    if (!(port->direction_flags & PORT_HAS_HW_CONTROL)) {
-      diren.attr.mode = S_IRUGO;
-      diren.store = NULL;
-    }
-  }
-
-  port->name = name;
-  port->alternates = alternate;
-  port->source = source;
-  port->diren = diren;
-
-  _port_attrs[0] = &port->name.attr;
-  _port_attrs[1] = &port->alternates.attr;
-  _port_attrs[2] = &port->source.attr;
-  _port_attrs[3] = &port->diren.attr;
-  _port_attrs[5] = NULL;
-
-
-  *port_attrs = _port_attrs;
-  return 0;
+	return ioread32(amx->regs + AXIMUX_REG(pin));
 }
 
-// probe driver
+static void aximux_write(struct aximux *amx, unsigned pin, u32 val)
+{
+	iowrite32(val, amx->regs + AXIMUX_REG(pin));
+}
+
+static void aximux_set_src(struct aximux *amx, unsigned pin, unsigned src)
+{
+	u32 val = aximux_read(amx, pin);
+
+	val = (val & ~AXIMUX_SRC_MASK) | (src & AXIMUX_SRC_MASK);
+	aximux_write(amx, pin, val);
+}
+
+static int aximux_find_pin_by_name(struct aximux *amx, const char *name)
+{
+	unsigned i;
+
+	for (i = 0; i < amx->npins; i++) {
+		if (!strcmp(amx->pins[i].name, name))
+			return amx->pins[i].number;
+	}
+	return -EINVAL;
+}
+
+static int aximux_add_function(struct aximux *amx, const char *name,
+			       const char *group, unsigned npins,
+			       const unsigned *mux_vals)
+{
+	struct aximux_function *fn;
+	unsigned *vals;
+	const char **groups;
+	unsigned **all_mux;
+	unsigned *all_npins;
+	unsigned f;
+
+	vals = kmemdup(mux_vals, npins * sizeof(*vals), GFP_KERNEL);
+	if (!vals)
+		return -ENOMEM;
+
+	for (f = 0; f < amx->nfunctions; f++) {
+		if (!strcmp(amx->functions[f].name, name))
+			break;
+	}
+
+	if (f == amx->nfunctions) {
+		fn = krealloc(amx->functions,
+			      (amx->nfunctions + 1) * sizeof(*fn), GFP_KERNEL);
+		if (!fn) {
+			kfree(vals);
+			return -ENOMEM;
+		}
+		amx->functions = fn;
+		fn = &amx->functions[amx->nfunctions];
+		memset(fn, 0, sizeof(*fn));
+		fn->name = name;
+		amx->nfunctions++;
+	} else {
+		fn = &amx->functions[f];
+	}
+
+	groups = krealloc(fn->groups, (fn->ngroups + 1) * sizeof(*groups),
+			  GFP_KERNEL);
+	all_mux = krealloc(fn->mux_vals, (fn->ngroups + 1) * sizeof(*all_mux),
+			   GFP_KERNEL);
+	all_npins = krealloc(fn->mux_npins,
+			     (fn->ngroups + 1) * sizeof(*all_npins), GFP_KERNEL);
+	if (!groups || !all_mux || !all_npins) {
+		kfree(vals);
+		return -ENOMEM;
+	}
+
+	fn->groups = groups;
+	fn->mux_vals = all_mux;
+	fn->mux_npins = all_npins;
+	fn->groups[fn->ngroups] = group;
+	fn->mux_vals[fn->ngroups] = vals;
+	fn->mux_npins[fn->ngroups] = npins;
+	fn->ngroups++;
+	return 0;
+}
+
+static int aximux_get_groups_count(struct pinctrl_dev *pctldev)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	return amx->ngroups;
+}
+
+static const char *aximux_get_group_name(struct pinctrl_dev *pctldev,
+					 unsigned selector)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	return amx->groups[selector].name;
+}
+
+static int aximux_get_group_pins(struct pinctrl_dev *pctldev, unsigned selector,
+				 const unsigned **pins, unsigned *npins)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	*pins = amx->groups[selector].pins;
+	*npins = amx->groups[selector].npins;
+	return 0;
+}
+
+static void aximux_pin_dbg_show(struct pinctrl_dev *pctldev, struct seq_file *s,
+				unsigned offset)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+	u32 val = aximux_read(amx, offset);
+
+	seq_printf(s, "src=%lu short=%u diren=%u dirctl=%u",
+		   val & AXIMUX_SRC_MASK,
+		   !!(val & AXIMUX_SHORT_BIT),
+		   !!(val & AXIMUX_DIREN_BIT),
+		   !!(val & AXIMUX_DIRCTL_BIT));
+}
+
+static const struct pinctrl_ops aximux_pinctrl_ops = {
+	.get_groups_count = aximux_get_groups_count,
+	.get_group_name = aximux_get_group_name,
+	.get_group_pins = aximux_get_group_pins,
+	.pin_dbg_show = aximux_pin_dbg_show,
+	.dt_node_to_map = pinconf_generic_dt_node_to_map_all,
+	.dt_free_map = pinconf_generic_dt_free_map,
+};
+
+static int aximux_get_functions_count(struct pinctrl_dev *pctldev)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	return amx->nfunctions;
+}
+
+static const char *aximux_get_function_name(struct pinctrl_dev *pctldev,
+					    unsigned selector)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	return amx->functions[selector].name;
+}
+
+static int aximux_get_function_groups(struct pinctrl_dev *pctldev,
+				      unsigned selector,
+				      const char *const **groups,
+				      unsigned *const ngroups)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+
+	*groups = amx->functions[selector].groups;
+	*ngroups = amx->functions[selector].ngroups;
+	return 0;
+}
+
+static int aximux_set_mux(struct pinctrl_dev *pctldev, unsigned func_selector,
+			  unsigned group_selector)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+	struct aximux_function *func = &amx->functions[func_selector];
+	struct aximux_group *grp = &amx->groups[group_selector];
+	unsigned i, g;
+
+	for (g = 0; g < func->ngroups; g++) {
+		if (!strcmp(func->groups[g], grp->name))
+			break;
+	}
+	if (g == func->ngroups)
+		return -EINVAL;
+	if (func->mux_npins[g] != grp->npins)
+		return -EINVAL;
+
+	for (i = 0; i < grp->npins; i++) {
+		unsigned pin = grp->pins[i];
+		unsigned src = func->mux_vals[g][i];
+
+		if (pin >= AXIMUX_MAX_PINS || src > amx->nalts)
+			return -EINVAL;
+		aximux_set_src(amx, pin, src);
+	}
+	return 0;
+}
+
+static const struct pinmux_ops aximux_pinmux_ops = {
+	.get_functions_count = aximux_get_functions_count,
+	.get_function_name = aximux_get_function_name,
+	.get_function_groups = aximux_get_function_groups,
+	.set_mux = aximux_set_mux,
+	.strict = true,
+};
+
+static int aximux_pinconf_get(struct pinctrl_dev *pctldev, unsigned pin,
+			      unsigned long *config)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+	enum pin_config_param param = pinconf_to_config_param(*config);
+	u32 val = aximux_read(amx, pin);
+	u16 arg;
+
+	switch ((unsigned int)param) {
+	case AXIMUX_CFG_SHORT:
+		arg = !!(val & AXIMUX_SHORT_BIT);
+		break;
+	case AXIMUX_CFG_DIR_SW:
+		arg = !!(val & AXIMUX_DIREN_BIT);
+		break;
+	case AXIMUX_CFG_DIR_OUT:
+		arg = !!(val & AXIMUX_DIRCTL_BIT);
+		break;
+	default:
+		return -ENOTSUPP;
+	}
+
+	*config = pinconf_to_config_packed(param, arg);
+	return 0;
+}
+
+static int aximux_pinconf_set(struct pinctrl_dev *pctldev, unsigned pin,
+			      unsigned long *configs, unsigned num_configs)
+{
+	struct aximux *amx = pinctrl_dev_get_drvdata(pctldev);
+	unsigned i;
+
+	for (i = 0; i < num_configs; i++) {
+		enum pin_config_param param = pinconf_to_config_param(configs[i]);
+		u16 arg = pinconf_to_config_argument(configs[i]);
+		u32 val = aximux_read(amx, pin);
+
+		switch ((unsigned int)param) {
+		case AXIMUX_CFG_SHORT:
+			if (arg)
+				val |= AXIMUX_SHORT_BIT;
+			else
+				val &= ~AXIMUX_SHORT_BIT;
+			break;
+		case AXIMUX_CFG_DIR_SW:
+			if (arg)
+				val |= AXIMUX_DIREN_BIT;
+			else
+				val &= ~AXIMUX_DIREN_BIT;
+			break;
+		case AXIMUX_CFG_DIR_OUT:
+			if (arg)
+				val |= AXIMUX_DIRCTL_BIT;
+			else
+				val &= ~AXIMUX_DIRCTL_BIT;
+			break;
+		default:
+			return -ENOTSUPP;
+		}
+		aximux_write(amx, pin, val);
+	}
+	return 0;
+}
+
+static int aximux_pinconf_group_get(struct pinctrl_dev *pctldev,
+				    unsigned group, unsigned long *config)
+{
+	const unsigned *pins;
+	unsigned npins;
+	int ret;
+
+	ret = aximux_get_group_pins(pctldev, group, &pins, &npins);
+	if (ret || !npins)
+		return ret ? ret : -EINVAL;
+	return aximux_pinconf_get(pctldev, pins[0], config);
+}
+
+static int aximux_pinconf_group_set(struct pinctrl_dev *pctldev,
+				    unsigned group, unsigned long *configs,
+				    unsigned num_configs)
+{
+	const unsigned *pins;
+	unsigned npins, i;
+	int ret;
+
+	ret = aximux_get_group_pins(pctldev, group, &pins, &npins);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < npins; i++) {
+		ret = aximux_pinconf_set(pctldev, pins[i], configs, num_configs);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static const struct pinconf_ops aximux_pinconf_ops = {
+	.is_generic = true,
+	.pin_config_get = aximux_pinconf_get,
+	.pin_config_set = aximux_pinconf_set,
+	.pin_config_group_get = aximux_pinconf_group_get,
+	.pin_config_group_set = aximux_pinconf_group_set,
+};
+
+static const struct pinconf_generic_params aximux_cfg_params[] = {
+	{ "brunosmmm,short", AXIMUX_CFG_SHORT, 0 },
+	{ "brunosmmm,dir-sw", AXIMUX_CFG_DIR_SW, 0 },
+	{ "brunosmmm,dir-out", AXIMUX_CFG_DIR_OUT, 0 },
+};
+
+static int aximux_parse_pins(struct aximux *amx, struct device_node *np)
+{
+	struct device_node *child;
+	unsigned idx = 0;
+	u32 info, hw_pins, hw_alts;
+
+	info = ioread32(amx->regs + AXIMUX_REG_MUXINFO);
+	hw_pins = info & 0xff;
+	hw_alts = (info >> 8) & 0xff;
+
+	if (!hw_pins || hw_pins > AXIMUX_MAX_PINS) {
+		dev_err(amx->dev, "invalid MUXINFO pins=%u\n", hw_pins);
+		return -EINVAL;
+	}
+	if (!hw_alts || hw_alts > AXIMUX_MAX_ALTS)
+		hw_alts = AXIMUX_MAX_ALTS;
+	amx->nalts = hw_alts;
+
+	for_each_available_child_of_node(np, child) {
+		u32 reg;
+
+		if (of_find_property(child, "brunosmmm,pins", NULL))
+			continue;
+		if (of_property_read_u32(child, "reg", &reg))
+			continue;
+		amx->npins++;
+	}
+
+	if (!amx->npins) {
+		amx->npins = hw_pins;
+		amx->pins = devm_kcalloc(amx->dev, amx->npins, sizeof(*amx->pins),
+					GFP_KERNEL);
+		amx->pindescs = devm_kcalloc(amx->dev, amx->npins,
+					     sizeof(*amx->pindescs), GFP_KERNEL);
+		if (!amx->pins || !amx->pindescs)
+			return -ENOMEM;
+
+		for (idx = 0; idx < amx->npins; idx++) {
+			char *name = devm_kasprintf(amx->dev, GFP_KERNEL,
+						    "pin%u", idx);
+
+			if (!name)
+				return -ENOMEM;
+			amx->pins[idx].number = idx;
+			amx->pins[idx].name = name;
+			amx->pindescs[idx].number = idx;
+			amx->pindescs[idx].name = name;
+		}
+		return 0;
+	}
+
+	if (amx->npins > hw_pins) {
+		dev_err(amx->dev, "DT pin count %u > MUXINFO %u\n",
+			amx->npins, hw_pins);
+		return -EINVAL;
+	}
+
+	amx->pins = devm_kcalloc(amx->dev, amx->npins, sizeof(*amx->pins),
+				 GFP_KERNEL);
+	amx->pindescs = devm_kcalloc(amx->dev, amx->npins, sizeof(*amx->pindescs),
+				     GFP_KERNEL);
+	if (!amx->pins || !amx->pindescs)
+		return -ENOMEM;
+
+	idx = 0;
+	for_each_available_child_of_node(np, child) {
+		u32 reg;
+		int n;
+		const char **names;
+		const char *prop = NULL;
+
+		if (of_find_property(child, "brunosmmm,pins", NULL))
+			continue;
+		if (of_property_read_u32(child, "reg", &reg))
+			continue;
+		if (reg >= hw_pins)
+			return -EINVAL;
+
+		amx->pins[idx].number = reg;
+		amx->pins[idx].name = child->name;
+
+		if (of_find_property(child, "function-names", NULL))
+			prop = "function-names";
+		else if (of_find_property(child, "alternate-names", NULL))
+			prop = "alternate-names";
+
+		if (prop) {
+			n = of_property_count_strings(child, prop);
+			if (n < 0)
+				return n;
+			names = devm_kcalloc(amx->dev, n, sizeof(*names),
+					     GFP_KERNEL);
+			if (!names)
+				return -ENOMEM;
+			if (of_property_read_string_array(child, prop, names, n) < 0)
+				return -EINVAL;
+			amx->pins[idx].func_names = names;
+			amx->pins[idx].nfuncs = n;
+		}
+
+		amx->pindescs[idx].number = reg;
+		amx->pindescs[idx].name = amx->pins[idx].name;
+		idx++;
+	}
+
+	return 0;
+}
+
+static int aximux_build_default_groups(struct aximux *amx)
+{
+	unsigned i, f;
+	int ret;
+
+	amx->groups = kcalloc(amx->npins, sizeof(*amx->groups), GFP_KERNEL);
+	if (!amx->groups)
+		return -ENOMEM;
+	amx->ngroups = amx->npins;
+
+	for (i = 0; i < amx->npins; i++) {
+		unsigned *pins = kmalloc(sizeof(*pins), GFP_KERNEL);
+
+		if (!pins)
+			return -ENOMEM;
+		pins[0] = amx->pins[i].number;
+		amx->groups[i].name = amx->pins[i].name;
+		amx->groups[i].pins = pins;
+		amx->groups[i].npins = 1;
+
+		for (f = 0; f < amx->pins[i].nfuncs; f++) {
+			unsigned mux = f;
+
+			ret = aximux_add_function(amx, amx->pins[i].func_names[f],
+						  amx->groups[i].name, 1, &mux);
+			if (ret)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+static int aximux_parse_extra_groups(struct aximux *amx, struct device_node *np)
+{
+	struct device_node *child;
+
+	for_each_available_child_of_node(np, child) {
+		int n, i, ret;
+		unsigned *pins;
+		unsigned *mux;
+		const char *fname;
+		struct aximux_group *newg, *grp;
+
+		n = of_property_count_strings(child, "brunosmmm,pins");
+		if (n <= 0)
+			continue;
+
+		pins = kmalloc_array(n, sizeof(*pins), GFP_KERNEL);
+		mux = kcalloc(n, sizeof(*mux), GFP_KERNEL);
+		if (!pins || !mux) {
+			kfree(pins);
+			kfree(mux);
+			return -ENOMEM;
+		}
+
+		for (i = 0; i < n; i++) {
+			const char *pname;
+			int pin;
+
+			ret = of_property_read_string_index(child, "brunosmmm,pins",
+							    i, &pname);
+			if (ret)
+				goto err;
+			pin = aximux_find_pin_by_name(amx, pname);
+			if (pin < 0) {
+				dev_err(amx->dev, "unknown pin '%s' in %pOFn\n",
+					pname, child);
+				ret = -EINVAL;
+				goto err;
+			}
+			pins[i] = pin;
+		}
+
+		if (of_property_read_u32_array(child, "brunosmmm,mux", mux, n)) {
+			for (i = 0; i < n; i++)
+				mux[i] = 0;
+		}
+
+		if (of_property_read_string(child, "brunosmmm,function", &fname))
+			fname = child->name;
+
+		newg = krealloc(amx->groups,
+				(amx->ngroups + 1) * sizeof(*amx->groups),
+				GFP_KERNEL);
+		if (!newg) {
+			ret = -ENOMEM;
+			goto err;
+		}
+		amx->groups = newg;
+		grp = &amx->groups[amx->ngroups];
+		grp->name = child->name;
+		grp->pins = pins;
+		grp->npins = n;
+		amx->ngroups++;
+
+		ret = aximux_add_function(amx, fname, child->name, n, mux);
+		kfree(mux);
+		if (ret)
+			return ret;
+		continue;
+err:
+		kfree(pins);
+		kfree(mux);
+		of_node_put(child);
+		return ret;
+	}
+	return 0;
+}
+
+static ssize_t srcsel_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct aximux *amx = dev_get_drvdata(dev);
+	unsigned i;
+	int len = 0;
+
+	for (i = 0; i < amx->npins; i++) {
+		u32 val = aximux_read(amx, amx->pins[i].number);
+
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%s:0x%02x\n",
+				 amx->pins[i].name, val & 0xff);
+	}
+	return len;
+}
+static DEVICE_ATTR_RO(srcsel);
+
+static struct attribute *aximux_attrs[] = {
+	&dev_attr_srcsel.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(aximux);
+
 static int aximux_probe(struct platform_device *pdev)
 {
-  struct device_node *node = pdev->dev.of_node, *child;
-  struct aximux_device *dev;
-  struct resource *io;
-  int err = 0;
-  unsigned int value = 0;
-  unsigned int iter = 0, iter2 = 0;
-  struct device *buf_inst;
-  dev_t devno = MKDEV(aximux_device_data->dev_major, aximux_device_data->available_instances);
-  unsigned int port_count = of_get_child_count(node);
+	struct aximux *amx;
+	struct pinctrl_desc *desc;
+	struct resource *res;
+	int ret;
 
-  //allocate
-  dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
-  if (!dev)
-    return -ENOMEM;
+	amx = devm_kzalloc(&pdev->dev, sizeof(*amx), GFP_KERNEL);
+	if (!amx)
+		return -ENOMEM;
 
-  dev->dev = &pdev->dev;
+	amx->dev = &pdev->dev;
+	platform_set_drvdata(pdev, amx);
 
-  //map I/O memory
-  io = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-  dev->regs = devm_ioremap_resource(&pdev->dev, io);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	amx->regs = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(amx->regs))
+		return PTR_ERR(amx->regs);
 
-  if (IS_ERR(dev->regs))
-    return PTR_ERR(dev->regs);
+	ret = aximux_parse_pins(amx, pdev->dev.of_node);
+	if (ret)
+		return ret;
 
-  // get size
-  value = reg_read(dev, AXIMUX_REG_MUXINFO);
-  dev->alt_sig_n = (value & 0xFF00) >> 8;
-  if (dev->alt_sig_n > SIGNAL_ALT_LIMIT) {
-    dev->alt_sig_n = SIGNAL_ALT_LIMIT;
-  }
-  dev->sig_count = (value & 0xFF);
-  if (dev->sig_count > SIGNAL_LIMIT) {
-    dev->sig_count = SIGNAL_LIMIT;
-  }
+	ret = aximux_build_default_groups(amx);
+	if (ret)
+		return ret;
 
-  if (port_count > dev->sig_count) {
-    printk(KERN_WARNING
-           "AXI Mux reports %d signals, but device-tree entry requests %d\n",
-           dev->sig_count, port_count);
-   port_count = dev->sig_count;
-  } else {
-    if (port_count < dev->sig_count) {
-      dev->sig_count = port_count;
-    }
-  }
-  printk(KERN_INFO "AXI Mux with %d ports\n", port_count);
+	ret = aximux_parse_extra_groups(amx, pdev->dev.of_node);
+	if (ret)
+		return ret;
 
-  // allocate port structures
-  dev->ports = devm_kzalloc(&pdev->dev, dev->sig_count*sizeof(struct aximux_port), GFP_KERNEL);
-  iter = 0;
-  for_each_child_of_node(node, child) {
-    // read port signal name
-    dev->ports[iter].idx = iter;
-    dev->ports[iter].signal_name =
-      devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT * sizeof(char), GFP_KERNEL);
-    strncpy(dev->ports[iter].signal_name, child->name, SIGNAL_NAME_LIMIT);
+	desc = devm_kzalloc(&pdev->dev, sizeof(*desc), GFP_KERNEL);
+	if (!desc)
+		return -ENOMEM;
 
-    // read alternate signal names
-    value = of_property_read_string_array(child, "alternate_names", NULL, dev->alt_sig_n);
-    if (value < 0) {
-      printk(KERN_ERR "AXI Mux: cannot read alternate signals from entry %s\n", child->name);
-      return -ENOENT;
-    }
-    if (value > dev->alt_sig_n) {
-      printk(KERN_WARNING "AXI Mux: too many alternate names in entry %s\n", child->name);
-      value = dev->alt_sig_n;
-    }
+	desc->name = dev_name(&pdev->dev);
+	desc->owner = THIS_MODULE;
+	desc->pins = amx->pindescs;
+	desc->npins = amx->npins;
+	desc->pctlops = &aximux_pinctrl_ops;
+	desc->pmxops = &aximux_pinmux_ops;
+	desc->confops = &aximux_pinconf_ops;
+	desc->custom_params = aximux_cfg_params;
+	desc->num_custom_params = ARRAY_SIZE(aximux_cfg_params);
 
-    // allocate alternate names
-    dev->ports[iter].alternate_count = value;
-    dev->ports[iter].alternate_names = devm_kzalloc(&pdev->dev, value*sizeof(char*), GFP_KERNEL);
-    for (iter2=0; iter2 < value; iter2++) {
-      dev->ports[iter].alternate_names[iter2] = devm_kzalloc(&pdev->dev, SIGNAL_NAME_LIMIT*sizeof(char), GFP_KERNEL);
-    }
-    // finally read
-    err = of_property_read_string_array(child, "alternate_names", dev->ports[iter].alternate_names, value);
-    if (err) {
-      return -ENOENT;
-    }
+	ret = devm_pinctrl_register_and_init(&pdev->dev, desc, amx, &amx->pctl);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to register pinctrl: %d\n", ret);
+		return ret;
+	}
 
-    // TODO: default values, default directions
+	ret = pinctrl_enable(amx->pctl);
+	if (ret)
+		return ret;
 
-    iter++;
-  }
-
-  //increment amount of available instances
-  dev->instance_number = aximux_device_data->available_instances;
-
-  aximux_device_data->driver_instances[aximux_device_data->available_instances] = dev;
-  aximux_device_data->available_instances++;
-
-  // populate sysfs entries depending on input width
-  for (iter = 0; iter < dev->sig_count; iter++) {
-    struct attribute_group *signal_group = devm_kzalloc(&pdev->dev, sizeof(struct attribute_group), GFP_KERNEL);
-    char *grp_name = devm_kzalloc(&pdev->dev, 8 * sizeof(char), GFP_KERNEL);
-    snprintf(grp_name, 8, "port%d", iter);
-    signal_group->name = grp_name;
-    // attributes: source, name, alternate_names
-    err = allocate_port_attributes(&pdev->dev, &dev->ports[iter], &signal_group->attrs);
-    if (err < 0) {
-      printk(KERN_ERR "AXI Mux: failed to allocate port attributes\n");
-      return err;
-    }
-    /* signal_group->attrs = port_attrs; */
-    // populate attributes
-    aximux_inst_attr_groups[iter] = signal_group;
-  }
-
-  //sysfs entries
-  buf_inst = device_create_with_groups(&aximux_class, &pdev->dev,
-                                       devno, dev,
-                                       aximux_inst_attr_groups,
-                                       "aximux%d", aximux_device_data->available_instances-1);
-
-  if (IS_ERR(buf_inst))
-   {
-      return PTR_ERR(buf_inst);
-   }
-
-  //store device "proxy"
-  dev->proxy_dev = buf_inst;
-  platform_set_drvdata(pdev, dev);
-  node->data = dev;
-
-  printk(KERN_INFO "%s: initialized aximux #%d\n", DRIVER_NAME,
-         aximux_device_data->available_instances-1);
-
-  return 0;
+	dev_info(&pdev->dev,
+		 "AXIMUX pinctrl ready: %u pins, %u groups, %u functions\n",
+		 amx->npins, amx->ngroups, amx->nfunctions);
+	return 0;
 }
 
-static int aximux_remove(struct platform_device *pdev)
-{
-  struct aximux_device* dev = platform_get_drvdata(pdev);
-
-  //decrement amount of available instances
-  aximux_device_data->available_instances--;
-
-  //unregister prody device
-  if (dev->proxy_dev)
-    {
-      device_destroy(&aximux_class, MKDEV(aximux_device_data->dev_major, dev->instance_number));
-    }
-
-  printk(KERN_INFO "%s: aximux #%d removed\n",
-         DRIVER_NAME,
-         dev->instance_number);
-
-  return 0;
-}
+static const struct of_device_id aximux_of_match[] = {
+	{ .compatible = "brunosmmm,aximux-2.0" },
+	{ .compatible = "axi-mux-2.0" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, aximux_of_match);
 
 static struct platform_driver aximux_driver = {
-  .probe = aximux_probe,
-  .remove = aximux_remove,
-  .driver = {
-    .name = DRIVER_NAME,
-    .of_match_table = of_match_ptr(aximux_of_ids),
-  },
+	.probe = aximux_probe,
+	.driver = {
+		.name = DRIVER_NAME,
+		.of_match_table = aximux_of_match,
+		.dev_groups = aximux_groups,
+	},
 };
 
-static int __init aximux_init(void)
-{
-  int err = 0;
-  dev_t devt = 0;
+module_platform_driver(aximux_driver);
 
-  //register ualu class
-  class_register(&aximux_class);
-
-  //initialize local data structures
-  aximux_device_data = kzalloc(sizeof(struct aximux_instance), GFP_KERNEL);
-  if (!aximux_device_data)
-    {
-      return -ENOMEM;
-    }
-
-  aximux_device_data->available_instances = 0;
-
-
-  err = alloc_chrdev_region(&devt, 0, AXIMUX_MAX_INSTANCES, "aximux");
-  if (err < 0)
-    {
-      return err;
-    }
-  aximux_device_data->dev_major = MAJOR(devt);
-
-  //register platform driver
-  platform_driver_register(&aximux_driver);
-
-  return 0;
-}
-
-static void __exit aximux_exit(void)
-{
-
-  unregister_chrdev_region(MKDEV(aximux_device_data->dev_major, 0), aximux_device_data->available_instances);
-
-  platform_driver_unregister(&aximux_driver);
-
-  class_destroy(&aximux_class);
-
-  //free all allocated instances
-  kfree(aximux_device_data);
-
-}
-
-module_init(aximux_init);
-module_exit(aximux_exit);
-
-MODULE_AUTHOR("brunosmmm@gmail.com");
-MODULE_DESCRIPTION("AXI-MUX driver");
-MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:"DRIVER_NAME);
+MODULE_AUTHOR("Bruno Morais <brunosmmm@gmail.com>");
+MODULE_DESCRIPTION("AXI Mux (AXIMUX) pin controller driver");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:" DRIVER_NAME);

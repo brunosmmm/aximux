@@ -1,0 +1,32 @@
+/*
+ * Example DT overlay fragment — adds a named consumer state without rebuilding
+ * the aximux module. Adjust target path / labels for your platform tree.
+ *
+ * Apply after the AXIMUX pin controller node exists (often with the bitstream).
+ */
+
+/dts-v1/;
+/plugin/;
+
+&aximux0 {
+	uart_lab_grp: uart-lab-grp {
+		brunosmmm,pins = "pin@0", "pin@1";
+		brunosmmm,function = "uart-lab";
+		brunosmmm,mux = <1 1>;
+	};
+};
+
+&{/} {
+	/* Example consumer requesting a named pinctrl state at probe */
+	example_consumer {
+		compatible = "example,consumer";
+		pinctrl-names = "default", "uart-lab";
+		pinctrl-0 = <&pin0_default>;
+		pinctrl-1 = <&uart_lab_state>;
+	};
+};
+
+/* State nodes are usually under the controller or a pinctrl hog map;
+ * platforms differ. Prefer board DTS maps using the standard pinctrl
+ * client bindings once the controller is registered.
+ */

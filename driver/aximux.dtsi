@@ -1,25 +1,32 @@
 / {
+	aximux0: pinctrl@0 {
+		compatible = "brunosmmm,aximux-2.0", "axi-mux-2.0";
+		reg = <0x0 0x1000>;
 
-aximux0: aximux@0x0000 {
-    compatible = "axi-mux-2.0";
-    alternate-signals = <8>;
-     // with HW direction control (cannot have defaults)
-    mysignal0 {
-      alternate-names = "alt0", "alt1";
-      hw-direction;
-    };
+		/* One child with `reg` per signal; names become 1-pin groups */
+		pin0: pin@0 {
+			reg = <0>;
+			function-names = "alt0", "alt1";
+		};
 
-    // with HW/SW control
-    mysignal1 {
-      alternate-names = "alt0", "alt1", "alt2";
-    }
+		pin1: pin@1 {
+			reg = <1>;
+			function-names = "alt0", "alt1", "alt2";
+		};
 
-    // SW control
-     mysignal2 {
-      alternate-names = "x", "y", "z";
-      sw-direction;
-      default-direction = <0>;
-    }
-  };
+		pin2: pin@2 {
+			reg = <2>;
+			function-names = "x", "y", "z";
+		};
 
+		/*
+		 * Optional multi-pin group. Selecting function "bundle" on this
+		 * group programs SRC for both pins from brunosmmm,mux.
+		 */
+		bundle_grp: bundle-grp {
+			brunosmmm,pins = "pin@0", "pin@1";
+			brunosmmm,function = "bundle";
+			brunosmmm,mux = <1 2>;
+		};
+	};
 };
