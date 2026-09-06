@@ -1,0 +1,30 @@
+{
+  "gpio_prefix": "gpio0",
+  "gpio_bases": {
+    "axi_mux_0": 0,
+    "axi_mux_1": 8
+  },
+  "overrides": {},
+  "rules": [
+    {"match": "^axi_iic_0\\.scl$", "replace": "i2c0.scl"},
+    {"match": "^axi_iic_0\\.sda$", "replace": "i2c0.sda"},
+    {"match": "^axi_iic_1\\.scl$", "replace": "i2c1.scl"},
+    {"match": "^axi_iic_1\\.sda$", "replace": "i2c1.sda"},
+    {"match": "^axi_quad_spi_0\\.io0$", "replace": "spi0.io0"},
+    {"match": "^axi_quad_spi_0\\.io1$", "replace": "spi0.io1"},
+    {"match": "^axi_quad_spi_0\\.ss$", "replace": "spi0.ss"},
+    {"match": "^axi_uart16550_0\\.sin$", "replace": "uart0.rxd"},
+    {"match": "^axi_uart16550_0\\.sout$", "replace": "uart0.txd"},
+    {"match": "^axi_uart16550_1\\.sin$", "replace": "uart1.rxd"},
+    {"match": "^axi_uart16550_1\\.sout$", "replace": "uart1.txd"},
+    {"match": "^axi_timer_0\\.pwm0$", "replace": "tmr0.pwm_cap0"},
+    {"match": "^axi_timer_0\\.capturetrig0$", "replace": "tmr0.pwm_cap0"},
+    {"match": "^axi_timer_1\\.pwm0$", "replace": "tmr1.pwm_cap0"},
+    {"match": "^axi_timer_1\\.capturetrig0$", "replace": "tmr1.pwm_cap0"},
+    {"match": "^axi_timer_2\\.pwm0$", "replace": "tmr2.pwm_cap0"},
+    {"match": "^axi_timer_2\\.capturetrig0$", "replace": "tmr2.pwm_cap0"},
+    {"match": "^axi_timer_3\\.capturetrig0$", "replace": "tmr3.pwm_cap0"},
+    {"match": "^axi_timer_3\\.capturetrig1$", "replace": "tmr3.cap1"},
+    {"match": "^hwpulsecap_0\\.edge_in$", "replace": "pulsecap0.edge"}
+  ]
+}
