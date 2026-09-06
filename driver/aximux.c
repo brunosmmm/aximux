@@ -462,7 +462,11 @@ static int aximux_parse_pins(struct aximux *amx, struct device_node *np)
 			return -EINVAL;
 
 		amx->pins[idx].number = reg;
-		amx->pins[idx].name = child->name;
+		/* child->name is only "pin" for pin@N; keep unique group names */
+		amx->pins[idx].name = devm_kasprintf(amx->dev, GFP_KERNEL,
+						     "pin%u", reg);
+		if (!amx->pins[idx].name)
+			return -ENOMEM;
 
 		if (of_find_property(child, "function-names", NULL))
 			prop = "function-names";
