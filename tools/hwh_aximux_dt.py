@@ -291,6 +291,9 @@ def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
     for mux in muxes:
         lines.append(f"&{mux['instance']} {{")
         lines.append('  compatible = "brunosmmm,aximux-2.0";')
+        lines.append("  #address-cells = <1>;")
+        lines.append("  #size-cells = <0>;")
+        lines.append("  #pinctrl-cells = <0>;")
         lines.append("")
         for pin in mux["pins"]:
             si = pin["index"]
@@ -298,7 +301,9 @@ def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
             fns = [fn_for(mux, si, a, naming) for a in range(max_alt + 1)]
             lines.append(f"  pin{si}: pin@{si} {{")
             lines.append(f"    reg = <{si}>;")
-            lines.append(f"    function-names = {_csv_strings(fns, '                    ')};")
+            lines.append(
+                f"    function-names = {_csv_strings(fns, '                    ')};"
+            )
             lines.append("  };")
             lines.append("")
 
@@ -307,19 +312,23 @@ def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
             for a in pin["alts"]:
                 if a["alt"] == 0:
                     continue
+                # Prefer incoming; UART TX often only has outgoing.
                 raw = (a.get("incoming") or {}).get("label")
+                if not raw:
+                    raw = (a.get("outgoing") or {}).get("label")
                 if not raw or is_noise(raw.split(".", 1)[0]):
                     continue
-                periph = raw.split(".", 1)[0]
-                groups[periph].append((pin["index"], a["alt"]))
+                nice = apply_naming(raw, pin["index"], a["alt"], naming, mux["instance"])
+                key = nice.rsplit(".", 1)[0] if "." in nice else nice
+                groups[key].append((pin["index"], a["alt"]))
 
-        for periph, entries in sorted(groups.items()):
-            gname = re.sub(r"^axi_", "", periph)
-            gname = gname.replace("iic", "i2c").replace("quad_spi", "spi")
+        for gname, entries in sorted(groups.items()):
             gname = re.sub(r"[^A-Za-z0-9_]", "_", gname)
-            pins_s = ", ".join(f'"pin@{e[0]}"' for e in entries)
+            # Driver pin names are pinN (not pin@N); keep pinctrl_* labels
+            # stable for board consumers (&pinctrl_i2c0).
+            pins_s = ", ".join(f'"pin{e[0]}"' for e in entries)
             mux_s = " ".join(str(e[1]) for e in entries)
-            lines.append(f"  {gname}_grp: {gname}-grp {{")
+            lines.append(f"  pinctrl_{gname}: {gname}-grp {{")
             lines.append(f"    brunosmmm,pins = {pins_s};")
             lines.append(f'    brunosmmm,function = "{gname}";')
             lines.append(f"    brunosmmm,mux = <{mux_s}>;")
