@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Minimal bc stand-in for Linux kernel timeconst.h generation only.
+# Reads HZ from stdin (as Kbuild does: echo $(CONFIG_HZ) | bc -q timeconst.bc).
+set -euo pipefail
+HZ="$(cat)"
+PREBUILT="${TIMECONST_H:-/home/bruno/work/ebaz4205/build-scarthgap/tmp/work-shared/ebaz4205-zynq7/kernel-build-artifacts/include/generated/timeconst.h}"
+if [[ "$HZ" != "100" ]]; then
+  echo "host-bc: only CONFIG_HZ=100 is supported (got '$HZ')" >&2
+  exit 1
+fi
+if [[ ! -f "$PREBUILT" ]]; then
+  echo "host-bc: missing $PREBUILT" >&2
+  exit 1
+fi
+# Kbuild discards bc's stdin script path; output must be the header body.
+cat "$PREBUILT"
