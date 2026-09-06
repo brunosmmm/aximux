@@ -299,7 +299,7 @@ def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
             si = pin["index"]
             max_alt = max((a["alt"] for a in pin["alts"]), default=0)
             fns = [fn_for(mux, si, a, naming) for a in range(max_alt + 1)]
-            lines.append(f"  pin{si}: pin@{si} {{")
+            lines.append(f"  {mux['instance']}_pin{si}: pin@{si} {{")
             lines.append(f"    reg = <{si}>;")
             lines.append(
                 f"    function-names = {_csv_strings(fns, '                    ')};"
