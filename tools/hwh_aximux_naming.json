@@ -5,6 +5,13 @@
     "axi_mux_1": 8
   },
   "overrides": {},
+  "consumer_labels": {},
+  "group_aliases": {
+    "tmr1": "pwm0",
+    "tmr0": "pwm1",
+    "tmr2": "pwm2"
+  },
+  "skip_consumers": [],
   "rules": [
     {"match": "^axi_iic_0\\.scl$", "replace": "i2c0.scl"},
     {"match": "^axi_iic_0\\.sda$", "replace": "i2c0.sda"},

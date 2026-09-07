@@ -282,12 +282,48 @@ def emit_legacy(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def collect_pinctrl2_groups(
+    mux: dict[str, Any], naming: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """group_name -> {entries: [(pin, alt)], consumers: set[dt_label]}."""
+    groups: dict[str, dict[str, Any]] = {}
+    consumer_labels = naming.get("consumer_labels") or {}
+    for pin in mux["pins"]:
+        for a in pin["alts"]:
+            if a["alt"] == 0:
+                continue
+            raw = (a.get("incoming") or {}).get("label")
+            if not raw:
+                raw = (a.get("outgoing") or {}).get("label")
+            if not raw:
+                continue
+            raw_inst = raw.split(".", 1)[0]
+            if is_noise(raw_inst):
+                continue
+            nice = apply_naming(raw, pin["index"], a["alt"], naming, mux["instance"])
+            gname = nice.rsplit(".", 1)[0] if "." in nice else nice
+            gname = re.sub(r"[^A-Za-z0-9_]", "_", gname)
+            slot = groups.setdefault(
+                gname, {"entries": [], "consumers": set()}
+            )
+            slot["entries"].append((pin["index"], a["alt"]))
+            # PL IP instance name is usually the DT label (axi_iic_0, …).
+            dt_label = consumer_labels.get(raw_inst, raw_inst)
+            if dt_label:
+                slot["consumers"].add(dt_label)
+    return groups
+
+
 def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
     lines = [
         "/* SPDX-License-Identifier: GPL-2.0-only */",
         "/* AUTO-GENERATED from system.hwh — brunosmmm,aximux-2.0 style. */",
+        "/* Includes mux pins/groups AND consumer pinctrl-0 wiring. */",
         "",
     ]
+    # gname -> {label, consumers} across muxes (for consumer emission)
+    all_groups: dict[str, dict[str, Any]] = {}
+
     for mux in muxes:
         lines.append(f"&{mux['instance']} {{")
         lines.append('  compatible = "brunosmmm,aximux-2.0";')
@@ -307,36 +343,73 @@ def emit_pinctrl2(muxes: list[dict[str, Any]], naming: dict[str, Any]) -> str:
             lines.append("  };")
             lines.append("")
 
-        groups: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        for pin in mux["pins"]:
-            for a in pin["alts"]:
-                if a["alt"] == 0:
-                    continue
-                # Prefer incoming; UART TX often only has outgoing.
-                raw = (a.get("incoming") or {}).get("label")
-                if not raw:
-                    raw = (a.get("outgoing") or {}).get("label")
-                if not raw or is_noise(raw.split(".", 1)[0]):
-                    continue
-                nice = apply_naming(raw, pin["index"], a["alt"], naming, mux["instance"])
-                key = nice.rsplit(".", 1)[0] if "." in nice else nice
-                groups[key].append((pin["index"], a["alt"]))
-
-        for gname, entries in sorted(groups.items()):
-            gname = re.sub(r"[^A-Za-z0-9_]", "_", gname)
-            # Driver pin names are pinN (not pin@N); keep pinctrl_* labels
-            # stable for board consumers (&pinctrl_i2c0).
+        groups = collect_pinctrl2_groups(mux, naming)
+        for gname, info in sorted(groups.items()):
+            entries = info["entries"]
             pins_s = ", ".join(f'"pin{e[0]}"' for e in entries)
             mux_s = " ".join(str(e[1]) for e in entries)
-            lines.append(f"  pinctrl_{gname}: {gname}-grp {{")
+            grp_node = f"{gname}-grp"
+            # Vendor props build driver pinmux tables; function/groups are
+            # required so pinconf_generic_dt_node_to_map_all can wire consumers.
+            lines.append(f"  pinctrl_{gname}: {grp_node} {{")
+            lines.append(f'    function = "{gname}";')
+            lines.append(f'    groups = "{grp_node}";')
             lines.append(f"    brunosmmm,pins = {pins_s};")
             lines.append(f'    brunosmmm,function = "{gname}";')
+            lines.append(f"    brunosmmm,mux = <{mux_s}>;")
+            lines.append("  };")
+            lines.append("")
+            prev = all_groups.get(gname)
+            if prev:
+                prev["consumers"] |= info["consumers"]
+            else:
+                all_groups[gname] = {
+                    "label": f"pinctrl_{gname}",
+                    "consumers": set(info["consumers"]),
+                }
+
+        # Optional board aliases (e.g. tmr1 -> pwm0) as extra selectable states.
+        for src, alias in (naming.get("group_aliases") or {}).items():
+            if src not in groups:
+                continue
+            entries = groups[src]["entries"]
+            pins_s = ", ".join(f'"pin{e[0]}"' for e in entries)
+            mux_s = " ".join(str(e[1]) for e in entries)
+            aname = re.sub(r"[^A-Za-z0-9_]", "_", alias)
+            agrp = f"{aname}-grp"
+            lines.append(f"  pinctrl_{aname}: {agrp} {{")
+            lines.append(f'    function = "{aname}";')
+            lines.append(f'    groups = "{agrp}";')
+            lines.append(f"    brunosmmm,pins = {pins_s};")
+            lines.append(f'    brunosmmm,function = "{aname}";')
             lines.append(f"    brunosmmm,mux = <{mux_s}>;")
             lines.append("  };")
             lines.append("")
 
         lines.append("};")
         lines.append("")
+
+    # Auto-wire PL consumers: &axi_iic_0 { pinctrl-0 = <&pinctrl_i2c0>; }
+    skip_consumers = set(naming.get("skip_consumers") or [])
+    lines.append("/* AUTO: consumer pinctrl-0 from HWH peer instances. */")
+    lines.append("")
+    # consumer_label -> list of pinctrl labels (usually one)
+    by_consumer: dict[str, list[str]] = defaultdict(list)
+    for gname, info in sorted(all_groups.items()):
+        for cons in sorted(info["consumers"]):
+            if cons in skip_consumers:
+                continue
+            by_consumer[cons].append(info["label"])
+
+    for cons, plabels in sorted(by_consumer.items()):
+        # One default state; if multiple groups (unusual), use first.
+        pl = plabels[0]
+        lines.append(f"&{cons} {{")
+        lines.append('  pinctrl-names = "default";')
+        lines.append(f"  pinctrl-0 = <&{pl}>;")
+        lines.append("};")
+        lines.append("")
+
     return "\n".join(lines)
 
 
